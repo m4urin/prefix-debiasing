@@ -1,3 +1,8 @@
+.idea/
+data/.cache/
+data/train/kaneko/attributes/
+data/train/kaneko/va/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
