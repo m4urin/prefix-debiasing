@@ -3,6 +3,10 @@ data/.cache/
 data/train/kaneko/attributes/
 data/train/kaneko/va/
 
+data/eval/winogender/wino_gender_test.parquet
+data/train/coref/*
+scripts/test.py
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
