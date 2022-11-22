@@ -1,0 +1,5 @@
+{
+   "$NOM_PRONOUN": ["he", "she", "they"],
+   "$POSS_PRONOUN": ["his", "her", "their"],
+   "$ACC_PRONOUN": ["him", "her", "them"]
+}

@@ -1,171 +1,302 @@
 from time import time
+from typing import Any
 
-import numpy as np
+import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 import torch
 from diffusers import get_linear_schedule_with_warmup
-from transformers import AdamW
+from torch.optim import AdamW
 
-from src.utils import sig_notation, fix_string_dataset, DATA_DIR, DEVICE
-from src.language_models import MaskedLanguageModel, Config
-
-
-class TrainResult:
-    def __init__(self,
-                 training_completed: bool = False,
-                 total_training_time: int = 0,
-                 minimal_loss: float = float('INF'),
-                 scalars: dict = None,
-                 parameters=None,
-                 n_parameters: int = 0
-                 ):
-
-        self.training_completed: bool = training_completed
-        self.total_training_time: int = total_training_time
-        self.minimal_loss: float = minimal_loss
-        self.scalars: dict = scalars if scalars is not None else {}
-        self.parameters = parameters
-        self.n_parameters = n_parameters
-
-    def add_scalar(self, name: str, scalar: float):
-        names = name.split('/')
-        sub = self.scalars
-        for n in names[:-1]:
-            if n not in sub:
-                sub[n] = {}
-            sub = sub[n]
-        if names[-1] not in sub:
-            sub[names[-1]] = []
-        sub[names[-1]].append(scalar)
-
-    def to_dict(self):
-        return {
-            'training_completed': self.training_completed,
-            'total_training_time': self.total_training_time,
-            'minimal_loss': self.minimal_loss,
-            'scalars': self.scalars,
-            'parameters': self.parameters,
-            'n_parameters': self.n_parameters
-        }
+from src.utils import sig_notation
+from src.MLM import MLM, ModelConfig
+from src.utils.io import DATA_DIR
+from src.utils.pytorch import DEVICE, fix_string_batch, freeze, unfreeze
+from src.utils.user_dicts import TrainInfo
 
 
 class Trainer:
-    def prepare_data(self, config: Config) -> dict:
+    def prepare_data(self, config: ModelConfig) -> dict:
         raise NotImplementedError('Not implemented yet.')
 
-    def calc_total_steps(self, train_data: dict, config: Config) -> int:
+    def calc_total_steps(self, data: dict, config: ModelConfig) -> int:
         raise NotImplementedError('Not implemented yet.')
 
-    def get_data_loader(self, epoch: int, train_data: dict, config: Config):
+    def get_train_loader(self, epoch: int, data: dict, config: ModelConfig):
         raise NotImplementedError('Not implemented yet.')
 
-    def calculate_loss(self, model: MaskedLanguageModel, x,
-                       train_data: dict, train_result: TrainResult) -> torch.Tensor:
+    def get_test_loader(self, epoch: int, data: dict, config: ModelConfig):
         raise NotImplementedError('Not implemented yet.')
 
-    def train(self, model: MaskedLanguageModel) -> TrainResult:
-        start_time = time()
+    def calculate_loss(self, model: MLM, batch: Any, data: dict, result: TrainInfo) -> torch.Tensor:
+        raise NotImplementedError('Not implemented yet.')
 
-        config = model.config
-        train_data = self.prepare_data(config)
-        total_steps = self.calc_total_steps(train_data, config)
-
-        optimizer = AdamW(params=model.get_parameters().parameters(), lr=config.lr)
-        scheduler = get_linear_schedule_with_warmup(optimizer=optimizer,
-                                                    num_warmup_steps=config.num_warmup_steps,
-                                                    num_training_steps=total_steps)
-
-        train_result = TrainResult()
-
-        progress_bar = tqdm(total=total_steps)
-        last_progress_bar_update = time()
-        for epoch in range(config.epochs):
-            for iteration, x in enumerate(self.get_data_loader(epoch, train_data, config)):
-                optimizer.zero_grad()
-                loss = self.calculate_loss(model, x, train_data, train_result)
-                loss.backward()
-                optimizer.step()
-                scheduler.step()
-                loss = loss.item()
-
-                train_result.minimal_loss = min(train_result.minimal_loss, loss)
-                train_result.add_scalar('loss/total', loss)
-
-                if iteration % 4 == 0 and time() - last_progress_bar_update > 4:
-                    progress_bar.set_description(
-                        desc=f"Training.. "
-                             f"loss={sig_notation(train_result.minimal_loss, 2)}, "
-                             f"epoch {epoch + 1}/{config.epochs}")
-                    last_progress_bar_update = time()
-                progress_bar.update(1)
-        train_result.training_completed = True
-        train_result.total_training_time = round(time() - start_time, 1)
-        train_result.parameters = model.get_parameters()
-        train_result.n_parameters = model.n_parameters
-        return train_result
+    def train(self, model: MLM) -> TrainInfo:
+        raise NotImplementedError('Not implemented yet.')
 
     @staticmethod
-    def from_config(config: Config):
-        if config.loss_function == 'kaneko':
-            return OrthogonalTrainer()
-        return None
+    def run(task: str, model: MLM):
+        if task == 'default':
+            if model.config.loss_function == 'kaneko':
+                trainer = OrthogonalTrainer()
+            else:
+                raise ValueError(f"Loss function '{model.config.loss_function}' is not supported.")
+            return trainer.train(model)
+        elif task == 'coreference-resolution':
+            return CorefTrainer().train(model)
+        else:
+            raise ValueError(f"Task '{task}' is not supported.")
 
 
 class OrthogonalTrainer(Trainer):
-    def prepare_data(self, config: Config) -> dict:
+    def prepare_data(self, config: ModelConfig) -> dict:
         folder = DATA_DIR['train/kaneko']
 
         v_a = folder[f'va/{config.model_name}.pt'].read().to(DEVICE)
         v_a.requires_grad = False
 
-        attr_embeddings = folder[f'attributes/{config.model_name}.pt'].read()
-        attr_embeddings.requires_grad = False
+        base_model = MLM.from_config(config=ModelConfig(config.model_name, 'base'), task='default').to(DEVICE).eval()
+        freeze(base_model)
 
         return {
             'v_a': v_a,
             'dataset_attribute': folder[f'attributes.parquet'].read(),
             'dataset_stereo': folder['stereotypes.parquet'].read(),
-            'attr_embeddings': attr_embeddings
+            'base_model': base_model
         }
 
-    def calc_total_steps(self, train_data: dict, config: Config) -> int:
+    def calc_total_steps(self, data: dict, config: ModelConfig) -> int:
         bs = config.batch_size // 2
-        iterations_per_epoch = len(train_data['dataset_attribute']) // bs
-        if len(train_data['dataset_attribute']) // bs != 0:
+        iterations_per_epoch = len(data['dataset_attribute']) // bs
+        if len(data['dataset_attribute']) % bs != 0:
             iterations_per_epoch += 1
         return config.epochs * iterations_per_epoch
 
-    def get_data_loader(self, epoch: int, train_data: dict, config: Config):
-        data_loader_attribute = DataLoader(train_data['dataset_attribute'], batch_size=config.batch_size // 2)
-        embedding_loader = iter(DataLoader(train_data['attr_embeddings'], batch_size=config.batch_size // 2))
-        data_loader_stereo = iter(DataLoader(train_data['dataset_stereo'].shuffle(seed=config.seed + epoch),
+    def get_train_loader(self, epoch: int, data: dict, config: ModelConfig):
+        data_loader_attribute = DataLoader(data['dataset_attribute'], batch_size=config.batch_size // 2)
+        data_loader_stereo = iter(DataLoader(data['dataset_stereo'].shuffle(seed=config.seed + epoch),
                                              batch_size=config.batch_size // 2))
 
         for x in data_loader_attribute:
-            attr = fix_string_dataset(x['sentences'])  # (bs//2, 3)
-            stereo = fix_string_dataset(next(data_loader_stereo)['sentences'])  # (bs//2, 3)
-            embeddings = next(embedding_loader).to(DEVICE)
-            yield np.concatenate((attr, stereo), axis=0), embeddings
+            attr = fix_string_batch(x['sentences'])  # (bs//2, 3)
+            stereo = fix_string_batch(next(data_loader_stereo)['sentences'])  # (bs//2, 3)
+            yield [''.join(s) for s in attr], stereo
 
-    def calculate_loss(self, model: MaskedLanguageModel, x,
-                       train_data: dict, train_result: TrainResult) -> torch.Tensor:
-        x, attr_old = x
-        bs = len(x)
-        embeddings = model.get_span_embeddings(model.tokenize_with_spans(x))  # (bs, n_layers, dim)
-        attr_new = embeddings[:bs // 2]  # (bs/2, n_layers, dim)
-        target_new = embeddings[bs // 2:]  # (bs/2, n_layers, dim)
+    def get_test_loader(self, epoch: int, data: dict, config: ModelConfig):
+        return []
 
-        orthogonal_loss = (torch.einsum('ald,tld->atl', train_data['v_a'], target_new) ** 2).mean()
-        train_result.add_scalar('loss/orthogonal', orthogonal_loss.item())
+    def calculate_loss(self, model: MLM, batch: Any, data: dict, result: TrainInfo) -> torch.Tensor:
+        x_attr, x_targ = batch
+        # x: (bs, 3)
+        enc_attr = model.tokenize(x_attr)
+        enc_targ = model.tokenize_with_spans(x_targ)
 
-        embedding_regularization_loss = 100 * ((attr_new - attr_old) ** 2).mean()
-        train_result.add_scalar('loss/embedding_regularization', embedding_regularization_loss.item())
+        attr_sent_lengths = enc_attr['attention_mask'].sum(dim=-1)
+
+        # bs/2 x (seq_len, n_layers, dim)
+        attr_new = [attr_sent[:int(_size.item())] for attr_sent, _size
+                    in zip(model.get_hidden_states(enc_attr), attr_sent_lengths)]
+        with torch.no_grad():
+            attr_old = [attr_sent[:int(_size.item())] for attr_sent, _size
+                        in zip(data['base_model'].get_hidden_states(enc_attr).detach(), attr_sent_lengths)]
+
+        # (bs/2, n_layers, dim)
+        target_new = model.get_span_embeddings(enc_targ, reduce='first')
+
+        embedding_regularization_loss = [((a1 - a2) ** 2).sum() for a1, a2 in zip(attr_old, attr_new)]
+        embedding_regularization_loss = 0.8 * torch.stack(embedding_regularization_loss).sum()
+        result.add_scalar(f'loss/embedding_regularization', embedding_regularization_loss.item())
+
+        # (bs/2, n_layers, dim)
+        orthogonal_loss = 0.1 * (torch.einsum('ald,tld->atl', data['v_a'], target_new) ** 2).sum()
+        result.add_scalar(f'loss/orthogonal', orthogonal_loss.item())
 
         prefix_regularization = 0
         if model.config.is_prefix():
-            prefix_regularization = 10 * model.prefix_embeddings.regularization()
-            train_result.add_scalar('loss/prefix_regularization', prefix_regularization.item())
+            prefix_regularization = 0.01 * model.prefix_embeddings.regularization()
+            result.add_scalar(f'loss/prefix_regularization', prefix_regularization.item())
 
-        return orthogonal_loss + embedding_regularization_loss + prefix_regularization
+        total_loss = orthogonal_loss + embedding_regularization_loss + prefix_regularization
+        result.train_loss = min(result.train_loss, total_loss.item())
+        result.add_scalar(f'loss/total', total_loss.item())
+        return total_loss
+
+    def train(self, model: MLM) -> TrainInfo:
+        start_time = time()
+        last_progress_bar_update = start_time
+
+        config = model.config
+        data = self.prepare_data(config)
+        total_steps = self.calc_total_steps(data, config)
+
+        optimizer = AdamW(params=model.parameters_dict.parameters(), lr=config.lr)
+        scheduler = get_linear_schedule_with_warmup(optimizer=optimizer,
+                                                    num_warmup_steps=config.num_warmup_steps,
+                                                    num_training_steps=total_steps)
+
+        result = TrainInfo()
+
+        progress_bar = tqdm(total=total_steps)
+        for epoch in range(config.epochs):
+            model.train()
+            for iteration, batch in enumerate(self.get_train_loader(epoch, data, config)):
+                optimizer.zero_grad()
+                loss = self.calculate_loss(model, batch, data, result)
+                loss.backward()
+                optimizer.step()
+                scheduler.step()
+
+                if iteration % 5 == 0 and time() - last_progress_bar_update > 5:
+                    progress_bar.set_description(
+                        desc=f"   Training.. "
+                             f"train_loss={sig_notation(result.train_loss, 2)}, "
+                             f"test_loss={sig_notation(result.test_loss, 2)}, "
+                             f"epoch {epoch + 1}/{config.epochs}")
+                    last_progress_bar_update = time()
+
+                progress_bar.update(1)
+
+        result.training_completed = True
+        result.total_training_time = round(time() - start_time, 1)
+        return result
+
+
+class CorefTrainer(Trainer):
+    def __init__(self):
+        self.stage = None
+        self.criterion = torch.nn.BCEWithLogitsLoss()
+        self.batch_size = 16
+        self.epochs = 4
+
+    def prepare_data(self, config: ModelConfig) -> dict:
+        folder = DATA_DIR['train/coref']
+        return {
+            'train': folder.read_file('coref_train.parquet'),
+            'test': folder.read_file('coref_test.parquet')
+        }
+
+    def calc_total_steps(self, data: dict, config: ModelConfig) -> int:
+        iterations_per_epoch = 0
+        for sub in ['train', 'test']:
+            iterations_per_epoch += len(data[sub]) // self.batch_size
+            if len(data[sub]) % self.batch_size != 0:
+                iterations_per_epoch += 1
+        return self.epochs * iterations_per_epoch
+
+    def get_train_loader(self, epoch: int, data: dict, config: ModelConfig):
+        """
+        'sentence': sentence parts
+        'subject_idx': subject index
+        'label': label
+        """
+        for x in DataLoader(data['train'].shuffle(seed=epoch), batch_size=self.batch_size):
+            yield fix_string_batch(x['sentence']), x['subject_idx'], x['label']
+
+    def get_test_loader(self, epoch: int, data: dict, config: ModelConfig):
+        """
+        'sentence': sentence parts
+        'subject_idx': subject index
+        'label': label
+        """
+        for x in DataLoader(data['test'].shuffle(seed=epoch), batch_size=self.batch_size):
+            yield fix_string_batch(x['sentence']), x['subject_idx'], x['label']
+
+    def calculate_loss(self, model: MLM, batch: Any, data: dict, result: TrainInfo) -> torch.Tensor:
+        sentences, subject_idx, labels = batch
+        labels = labels.unsqueeze(-1).to(device=DEVICE, dtype=torch.float32).detach()
+        enc = model.tokenize_with_spans(sentences)
+        # (bs, 1)
+        y_pred = model.get_coref_predictions(enc, subject_idx)
+        result.add_scalar(f'{self.stage}/accuracy', 1.0 - torch.abs((y_pred > 0).float() - labels).mean().item())
+
+        loss = self.criterion(y_pred, labels)
+        result.add_scalar(f'{self.stage}/loss', loss.item())
+        if self.stage == 'train':
+            result.train_loss = min(result.train_loss, loss.item())
+        else:
+            result.test_loss = min(result.test_loss, loss.item())
+        return loss
+
+    def train(self, model: MLM) -> TrainInfo:
+        start_time = time()
+        last_progress_bar_update = start_time - 6
+
+        data = self.prepare_data(model.config)
+        total_steps = self.calc_total_steps(data, model.config)
+
+        freeze(model)
+        unfreeze(model.parameters_dict['coreference-resolution'])
+        optimizer = AdamW(params=model.parameters_dict['coreference-resolution'].parameters(), lr=0.0005)
+        scheduler = get_linear_schedule_with_warmup(optimizer=optimizer,
+                                                    num_warmup_steps=40,
+                                                    num_training_steps=2 + int(total_steps/self.epochs))
+
+        all_losses_train = []
+        all_losses_eval = []
+
+        result = TrainInfo()
+
+        progress_bar = tqdm(total=total_steps)
+        for epoch in range(self.epochs):
+
+            if epoch == 1:
+                unfreeze(model.parameters_dict)
+                optimizer = AdamW(params=model.parameters_dict.parameters(), lr=0.00005)
+                scheduler = get_linear_schedule_with_warmup(optimizer=optimizer,
+                                                            num_warmup_steps=100,
+                                                            num_training_steps=2 + int(total_steps *
+                                                                                       (self.epochs-1) / self.epochs))
+
+            self.stage = 'train'
+            model.train()
+            for iteration, batch in enumerate(self.get_train_loader(epoch, data, model.config)):
+                optimizer.zero_grad()
+                loss = self.calculate_loss(model, batch, data, result)
+                loss.backward()
+                optimizer.step()
+                scheduler.step()
+                all_losses_train.append(loss.item())
+
+                if iteration % 5 == 0 and time() - last_progress_bar_update > 5:
+                    progress_bar.set_description(
+                        desc=f"   Training.. "
+                             f"train_loss={sig_notation(result.train_loss, 2)}, "
+                             f"test_loss={sig_notation(result.test_loss, 2)}, "
+                             f"epoch {epoch + 1}/{self.epochs}")
+                    last_progress_bar_update = time()
+
+                progress_bar.update(1)
+
+            self.stage = 'test'
+            last_progress_bar_update = time() - 6
+            with torch.no_grad():
+                model.eval()
+                for iteration, batch in enumerate(self.get_test_loader(epoch, data, model.config)):
+                    loss = self.calculate_loss(model, batch, data, result)
+                    all_losses_eval.append(loss.item())
+
+                    if iteration % 5 == 0 and time() - last_progress_bar_update > 5:
+                        progress_bar.set_description(
+                            desc=f"   Testing.. "
+                                 f"train_loss={sig_notation(result.train_loss, 2)}, "
+                                 f"test_loss={sig_notation(result.test_loss, 2)}, "
+                                 f"epoch {epoch + 1}/{self.epochs}")
+                        last_progress_bar_update = time()
+                    progress_bar.update(1)
+
+        """
+        plt.plot(all_losses_train, label='train')
+        plt.plot(all_losses_eval, label='eval')
+        plt.legend()
+        plt.show()
+        plt.clf()
+        plt.plot(result.scalars['train']['accuracy'], label='train')
+        plt.plot(result.scalars['test']['accuracy'], label='test')
+        plt.legend()
+        plt.show()
+        plt.clf()
+        """
+        result.training_completed = True
+        result.total_training_time = round(time() - start_time, 1)
+        return result

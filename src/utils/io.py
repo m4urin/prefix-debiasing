@@ -1,18 +1,14 @@
-import os
 import json
+import os
 import shutil
-import collections
 from pathlib import Path
 
-import torch
+import pandas as pd
 import datasets
-
-from tqdm import tqdm
-from matplotlib import pyplot as plt
+import torch
 from datasets import Dataset
 
-import numpy as np
-import pandas as pd
+from src.utils import pretty_bytes
 
 
 class IOFile:
@@ -57,7 +53,8 @@ class IOFile:
             '.json': JsonFile,
             '.pt': TorchFile,
             '.txt': TextFile,
-            '.csv': DataFrameFile,
+            '.csv': CSVDataFrameFile,
+            '.tsv': TSVDataFrameFile,
             '.parquet': DatasetFile,
             '.png': ImageFile,
             '.jpg': CompressedImageFile,
@@ -209,12 +206,20 @@ class TextFile(IOFile):
             return [line.rstrip() for line in file.readlines()]
 
 
-class DataFrameFile(IOFile):
+class CSVDataFrameFile(IOFile):
     def write(self, df):
         df.to_csv(self.path, index=False)
 
     def read(self):
         return pd.read_csv(self.path)
+
+
+class TSVDataFrameFile(IOFile):
+    def write(self, df):
+        df.to_csv(self.path, index=False, sep='\t')
+
+    def read(self):
+        return pd.read_csv(self.path, sep='\t')
 
 
 class DatasetFile(IOFile):
@@ -242,172 +247,4 @@ class CompressedImageFile(IOFile):
         raise Exception('Images should not be read.')
 
 
-class _BatchIterator:
-    def __init__(self, data: list, batch_size: int):
-        self.data = data
-        self.batch_size = batch_size
-        self.iterations = len(data) // batch_size
-        if len(data) % batch_size != 0:
-            self.iterations += 1
-
-    def __len__(self):
-        return self.iterations
-
-    def __getitem__(self, i):
-        if i < 0 or i >= self.iterations:
-            raise IndexError('list index out of range')
-        return self.data[i * self.batch_size:(i + 1) * self.batch_size]
-
-    def __iter__(self):
-        for i in range(self.iterations):
-            yield self[i]
-
-
-def batched(data: list, batch_size: int):
-    return _BatchIterator(data, batch_size)
-
-
-def tbatched(data: list, batch_size: int, desc: str = None):
-    return tqdm(batched(data, batch_size), desc=desc)
-
-
-def sig_notation(i, decimals=1):
-    if 1 <= i < 10:
-        return f'{round(i, decimals)}'
-    elif i >= 10:
-        p = 0
-        while i >= 10:
-            i /= 10
-            p += 1
-        return f'{round(i, decimals)}e{p}'
-    else:
-        p = 0
-        while i < 1:
-            i *= 10
-            p += 1
-        return f'{round(i, decimals)}e-{p}'
-
-
-def pretty_bytes(n_bytes: int) -> str:
-    setting = [(' bytes', 0), ('KB', 0), ('MB', 0), ('GB', 1), ('TB', 2)]
-    for i in range(len(setting) - 1):
-        size = n_bytes / (1024 ** i)
-        if size < 999.9:
-            label, round_decimals = setting[i]
-            size = round(size, round_decimals)
-            if round_decimals == 0:
-                size = int(size)
-            return f'{size}{label}'
-    raise ValueError('This should not happen!')
-
-
-def dataframe_from_dicts(d: list[dict]):
-    return pd.DataFrame.from_dict(stack_dicts(d))
-
-
-def stack_dicts(all_dicts: list[dict]):
-    if len(all_dicts) == 0:
-        return {}
-    if len(all_dicts) == 1:
-        return all_dicts[0]
-
-    d_result = {}
-    for d in all_dicts:
-        for k in d.keys():
-            d_result[k] = []
-
-    for d in all_dicts:
-        for k in d_result.keys():
-            if k in d:
-                d_result[k].append(d[k])
-            else:
-                d_result[k].append(None)
-    return d_result
-
-
-def flatten_dict(all_dicts, parent_key='', sep='_'):
-    items = []
-    for k, v in all_dicts.items():
-        new_key = parent_key + sep + k if parent_key else k
-        if isinstance(v, collections.MutableMapping):
-            items.extend(flatten_dict(v, new_key, sep=sep).items())
-        else:
-            items.append((new_key, v))
-    return dict(items)
-
-
-def plot_scalars(results, folder, skip_warmup=0):
-    data = [flatten_dict(e.train_result.scalars) for e in results]
-    data = stack_dicts(data)
-    for scalar_name, scalar_data in data.items():
-        plt.title(scalar_name)
-        plt.xlabel('Iterations')
-        plt.ylabel('Loss')
-        for i, x in enumerate(scalar_data):
-            if x is not None:
-                plt.plot(x[skip_warmup:], label=results[i].config.model_name + '_' + results[i].config.model_type)
-        plt.legend()
-        folder.write_file(scalar_name + '.png', plt)
-        plt.clf()
-
-
-def repeat_stacked(x: torch.Tensor, n: int):
-    return x.unsqueeze(0).repeat(n, *([1] * len(x.size())))
-
-
-def try_int(value):
-    if value is None or isinstance(value, int):
-        return value
-    try:
-        return int(value)
-    except ValueError:
-        return value
-
-
-def try_float(value):
-    if value is None or isinstance(value, float):
-        return value
-    try:
-        return float(value)
-    except ValueError:
-        return value
-
-
-def get_one_of_attributes(obj, attributes: list[str]):
-    for attr in attributes:
-        if hasattr(obj, attr):
-            return getattr(obj, attr)
-    raise AttributeError(f"'obj ' has none of the following attributes: {attributes}, "
-                         f"it has the following attributes: {list(obj.__dict__.keys())}")
-
-
-def split_words(text: str, separator: str):
-    return [s for s in text.split(separator) if len(s) > 0]
-
-
-def deep_tensor(tensor_list) -> torch.Tensor:
-    if isinstance(tensor_list, torch.Tensor):
-        return tensor_list
-    if isinstance(tensor_list, list):
-        return torch.stack([deep_tensor(t) for t in tensor_list])
-
-
-def fix_tensor_dataset(x):
-    x = deep_tensor(x)
-    return x.permute((-1, *range(len(x.size()) - 1)))
-
-
-def fix_string_dataset(x):
-    x = np.array(x)
-    return x.transpose((-1, *range(len(x.shape) - 1)))
-
-
-def print_title(title):
-    title = f'## {title} ##'
-    border = '#' * len(title)
-    print(f'\n{border}\n{title}\n{border}')
-
-
-""" GLOBALS """
-DATA_DIR = IOFolder(os.path.join(Path(os.path.dirname(os.path.abspath(__file__))).parents[0], 'data'))
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+DATA_DIR = IOFolder(os.path.join(Path(os.path.dirname(os.path.abspath(__file__))).parents[1], 'data'))

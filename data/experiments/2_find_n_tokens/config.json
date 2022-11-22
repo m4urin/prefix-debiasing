@@ -1,13 +1,14 @@
 {
   "model_name": ["roberta-base"],
   "model_type": ["base", "finetune", "prefix"],
-  "prefix_mode": ["replace"],
+  "prefix_mode": ["linear"],
   "prefix_layers": ["all"],
-  "n_prefix_tokens": [16],
+  "n_prefix_tokens": [4, 6, 8, 12, 16],
   "batch_size": 32,
-  "lr": { "finetune": 0.00004, "prefix": 0.01 },
+  "lr": {"finetune": 0.00003, "prefix": 0.001},
   "epochs": 3,
   "loss_function": ["kaneko"],
   "num_warmup_steps": 200,
-  "seed":42
+  "seed":42,
+  "tasks": ["default", "coreference-resolution"]
 }

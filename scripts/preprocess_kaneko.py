@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from tqdm import trange, tqdm
 from unidecode import unidecode
 
-from src.language_models import MaskedLanguageModel, BaseMLM
+from src.MLM import MLM, BaseMLM
 from src.utils import fix_string_dataset, DATA_DIR, DEVICE
 
 
@@ -61,7 +61,7 @@ def preprocess_raw_data():
     DATA_DIR['train/kaneko'].write_file('stereotypes.parquet', stereotype_sentences.shuffle())
 
 
-def calc_v_a(model: MaskedLanguageModel, batch_size=32):
+def calc_v_a(model: MLM, batch_size=32):
     with torch.no_grad():
         v_a = {}
         all_embeddings = []
@@ -70,21 +70,22 @@ def calc_v_a(model: MaskedLanguageModel, batch_size=32):
                                  batch_size=batch_size),
                       desc=f'V_a for {model.config.model_name}'):
             x = fix_string_dataset(x['sentences'])
-            embeddings = model.get_span_embeddings(model.tokenize_with_spans(x)).detach().cpu()  # (bs, n_layers, dim)
+            enc = model.tokenize_with_spans(x)
+            # (2, bs, n_layers, dim)
+            span_embeddings = model.get_span_embeddings(enc, reduce='both').detach()
+
             for i in range(len(x)):
                 word = x[i][1].lower().strip()
                 if word not in v_a:
-                    v_a[word] = []
-                v_a[word].append(embeddings[i])
-            all_embeddings.append(embeddings)
+                    v_a[word] = ([], [])
+                for j in range(2):
+                    v_a[word][j].append(span_embeddings[j, i])
 
-        v_a = torch.stack([torch.stack(v).mean(0) for v in v_a.values()])
+        v_a = [[torch.stack(v_first).mean(0), torch.stack(v_mean).mean(0)] for v_first, v_mean in v_a.values()]
+        v_a = torch.stack(sum(v_a, []))
+        print(v_a.size())
         DATA_DIR['train/kaneko'].get_folder('va', create_if_not_exist=True) \
             .write_file(f'{model.config.model_name}.pt', v_a)
-
-        all_embeddings = torch.cat(all_embeddings, dim=0).to(dtype=torch.float16)
-        DATA_DIR['train/kaneko'].get_folder('attributes', create_if_not_exist=True) \
-            .write_file(f'{model.config.model_name}.pt', all_embeddings)
 
 
 def preprocess_v_a():

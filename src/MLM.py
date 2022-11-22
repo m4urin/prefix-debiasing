@@ -1,138 +1,19 @@
+from collections import OrderedDict
 import torch
 from torch import nn
 import numpy as np
 from typing import Optional, Union, Tuple
-import hashlib
 
 from transformers import AutoTokenizer, AutoModelForMaskedLM, AutoConfig
 from transformers import BatchEncoding, DistilBertForMaskedLM, RobertaForMaskedLM
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPastAndCrossAttentions
 
-from src.utils import try_int, sig_notation, get_one_of_attributes, tbatched, repeat_stacked, DEVICE
-
-MODEL_NAMES = ['distilbert-base-uncased', 'roberta-base']
-MODEL_TYPES = ['base', 'finetune', 'prefix']
-PREFIX_MODES = ['identity', 'linear', 'replace']
-PREFIX_LAYERS = ['all', 'half']
-LOSS_FUNCTIONS = ['kaneko']
+from src.utils import get_one_of_attributes, tbatched
+from src.utils.user_dicts import ModelConfig
+from src.utils.pytorch import repeat_stacked, DEVICE, freeze, unfreeze, count_parameters
 
 
-class Config:
-    def __init__(self,
-                 model_name: str,
-                 model_type: str,
-                 prefix_mode: str = None,
-                 prefix_layers: Union[str, int] = None,
-                 n_prefix_tokens: int = None,
-                 loss_function: str = None,
-                 epochs: int = None,
-                 batch_size: int = None,
-                 lr: float = None,
-                 num_warmup_steps: int = None,
-                 seed: int = None):
-        super().__init__()
-        errors = []
-
-        self.model_name = model_name
-        self.model_type = model_type
-        errors.extend(self.verify_attribute('model_name', text=MODEL_NAMES))
-        errors.extend(self.verify_attribute('model_type', text=MODEL_TYPES))
-
-        if model_type == 'prefix':
-            self.prefix_mode = prefix_mode
-            self.prefix_layers = try_int(prefix_layers)
-            self.n_prefix_tokens = n_prefix_tokens
-            errors.extend(self.verify_attribute('prefix_mode', text=PREFIX_MODES))
-            errors.extend(self.verify_attribute('prefix_layers', numeric=(int, 1, 24), text=PREFIX_LAYERS))
-            errors.extend(self.verify_attribute('n_prefix_tokens', numeric=(int, 1, 65)))
-
-        if model_type != 'base':
-            self.loss_function = loss_function
-            self.epochs = epochs
-            self.batch_size = batch_size
-            self.lr = lr
-            self.num_warmup_steps = num_warmup_steps
-            self.seed = seed
-            errors.extend(self.verify_attribute('loss_function', text=LOSS_FUNCTIONS))
-            errors.extend(self.verify_attribute('epochs', numeric=(int, 1, 10)))
-            errors.extend(self.verify_attribute('batch_size', numeric=(int, 1, 65)))
-            errors.extend(self.verify_attribute('lr', numeric=(float, 1e-7, 0.1)))
-            errors.extend(self.verify_attribute('num_warmup_steps', numeric=(int, 10, 10000)))
-            errors.extend(self.verify_attribute('seed', numeric=(int, 0, 1000000000)))
-
-        if len(errors) > 0:
-            raise ValueError(str(self) + '\n- '.join([''] + errors))
-
-    def verify_attribute(self, attr_name: str, numeric=None, text: list[str] = None) -> list[str]:
-        errors = []
-        if not hasattr(self, attr_name):
-            errors.append(f"Value for attribute '{attr_name}' is missing.")
-            return errors
-        attr_value = getattr(self, attr_name)
-        if text is not None and attr_value in text:
-            return errors
-        if text is not None and attr_value not in text:
-            if isinstance(attr_value, str) or numeric is None:
-                txt = f"{type(attr_value).__name__} value '{attr_value}' for attribute '{attr_name}' " \
-                      f"is not supported, please choose from: {text}"
-                if numeric is not None:
-                    numeric_type, lower_bound, upper_bound = numeric
-                    txt += f", or provide a {numeric_type.__name__} in the range of [{lower_bound}, {upper_bound}]"
-                errors.append(txt + '.')
-                return errors
-        if numeric is not None:
-            numeric_type, lower_bound, upper_bound = numeric
-            # is numeric
-            if type(attr_value) != numeric_type or attr_value < lower_bound or attr_value >= upper_bound:
-                txt = f"{type(attr_value).__name__} value '{attr_value}' for attribute '{attr_name}' " \
-                      f"should be a {numeric_type.__name__} in the range of [{lower_bound}, {upper_bound}]"
-                if text is not None:
-                    txt += f', or one of the following: {text}'
-                errors.append(txt + '.')
-        return errors
-
-    def is_prefix(self) -> bool:
-        return self.model_type == 'prefix'
-
-    def is_trainable(self) -> bool:
-        return self.model_type != 'base'
-
-    def to_dict(self):
-        return self.__dict__
-
-    def __str__(self):
-        txt = f"Config({self.model_name}"
-        if self.is_prefix():
-            txt += f",{self.prefix_mode},layers={self.prefix_layers},tokens={self.n_prefix_tokens}"
-        if self.is_trainable():
-            txt += f",loss={self.loss_function}" \
-                   f",epochs={self.epochs}" \
-                   f",bs={self.batch_size}" \
-                   f",lr={sig_notation(self.lr, 3)}" \
-                   f",warmup={self.num_warmup_steps}"
-        return txt + ')'
-
-    def __repr__(self):
-        return str(self)
-
-    def __hash__(self):
-        return hash(str(self.to_dict()))
-
-    def get_hash(self):
-        return hashlib.sha1(str(self.to_dict()).encode()).hexdigest()
-
-    def __eq__(self, other):
-        if isinstance(other, Config):
-            other_dict = other.to_dict()
-            self_dict = self.to_dict()
-            for key in set(list(other_dict.keys()) + list(self_dict.keys())):
-                if key not in self_dict or key not in other_dict or self_dict[key] != other_dict[key]:
-                    return False
-            return True
-        return False
-
-
-class TokenizerRegister:
+class Tokenizers:
     """ Class to store tokenizers, as loading a tokenizer takes a lot of time. """
 
     def __init__(self):
@@ -140,61 +21,89 @@ class TokenizerRegister:
 
     def __getitem__(self, model_name: str):
         if model_name not in self.tokenizers:
+            # utils.start_progress(f"Load '{model_name}' tokenizer..")
             self.tokenizers[model_name] = AutoTokenizer.from_pretrained(model_name)
+            # utils.end_progress()
         return self.tokenizers[model_name]
 
 
-TOKENIZERS = TokenizerRegister()
+TOKENIZER = Tokenizers()
 
 
-class MaskedLanguageModel(nn.Module):
-    def __init__(self, config: Union[dict, Config], parameters=None, **kwargs):
+class MLM(nn.Module):
+    def __init__(self, config: ModelConfig, task: str, modules: nn.ModuleDict = None):
         super().__init__()
-        self.config = config if isinstance(config, Config) else Config(**config)
+        self.config = config
         pretrained_config = AutoConfig.from_pretrained(self.config.model_name)
         self.total_layers = get_one_of_attributes(pretrained_config, ['n_layers', 'num_hidden_layers'])
         self.dim = get_one_of_attributes(pretrained_config, ['dim', 'hidden_size'])
-        self.model = self.load_model(parameters)
+        self.tokenizer = TOKENIZER[self.config.model_name]
+        self.task = task
+        if modules is None:
+            self.module_dict = nn.ModuleDict()
+        else:
+            self.module_dict = modules
 
-        self.n_parameters = 0
-        for param in self.get_parameters().parameters():
-            self.n_parameters += param.nelement()
+        if 'model' not in self.module_dict:
+            self.module_dict['model'] = AutoModelForMaskedLM.from_pretrained(self.config.model_name)
 
-    """ PROPERTIES """
+        if self.task == 'coreference-resolution' and 'coreference-resolution' not in self.module_dict:
+            self.module_dict['coreference-resolution'] = nn.Sequential(OrderedDict([
+                        ('f1', nn.Linear(self.dim * 2, 20)),
+                        ('dropout', nn.Dropout(0.2)),
+                        ('swish', nn.SiLU()),
+                        ('f2', nn.Linear(20, 1))]))
+
+        # freeze all parameters
+        for m in self.module_dict.values():
+            freeze(m)
+
+        # parameters to save
+        self.parameters_dict = nn.ModuleDict()
+
     @property
-    def tokenizer(self):
-        return TOKENIZERS[self.config.model_name]
+    def n_parameters(self):
+        return count_parameters(self.parameters_dict.values())
 
-    """ METHODS TO OVERRIDE """
-    def load_model(self, parameters: nn.Module) -> nn.Module:
-        raise NotImplementedError('Not implemented.')
-
-    def get_parameters(self) -> nn.Module:
-        raise NotImplementedError('Not implemented.')
+    """ STATIC METHODS """
+    @staticmethod
+    def get_test_model(model_name='distilbert-base-uncased', model_type='finetune'):
+        if model_type == 'finetune':
+            config = ModelConfig(model_name=model_name, model_type='finetune',
+                                 loss_function='kaneko', epochs=1, batch_size=32, lr=0.00002, num_warmup_steps=2,
+                                 seed=42)
+        elif model_type == 'prefix':
+            config = ModelConfig(model_name=model_name, model_type='prefix',
+                                 prefix_mode='linear', prefix_layers='all', n_prefix_tokens=8,
+                                 loss_function='kaneko', epochs=1, batch_size=32, lr=0.00002, num_warmup_steps=2,
+                                 seed=42)
+        else:
+            config = ModelConfig(model_name=model_name, model_type='base')
+        return MLM.from_config(config, 'default').to(DEVICE)
 
     @staticmethod
-    def from_config(config: Config, parameters: nn.Module = None, **kwargs):
+    def from_config(config: ModelConfig, task: str, modules: nn.ModuleDict = None):
         if config.model_type == 'base':
-            return BaseMLM(config)
-        if config.model_type == 'finetune':
-            return FineTuneMLM(config, parameters, **kwargs)
-        if config.model_type == 'prefix':
-            return PrefixMLM(config, parameters, **kwargs)
-        raise ValueError(f"Cannot load MLM with config file: {config}")
+            return BaseMLM(config, task, modules)
+        elif config.model_type == 'finetune':
+            return FineTuneMLM(config, task, modules)
+        elif config.model_type == 'prefix':
+            return PrefixMLM(config, task, modules)
+        else:
+            raise ValueError(f"Cannot load MLM with config file: {config}")
 
     """ MLM functions to use """
     def forward(self, input_ids: Optional[torch.LongTensor] = None, attention_mask: Optional[torch.FloatTensor] = None,
                 inputs_embeds: Optional[torch.FloatTensor] = None, labels: Optional[torch.LongTensor] = None,
                 output_attentions: Optional[bool] = None, output_hidden_states: Optional[bool] = None,
                 return_dict: Optional[bool] = None, **kwargs):
-        assert self.model is not None, 'Please call load() once to load the model'
-        return self.model(input_ids=input_ids,
-                          attention_mask=attention_mask,
-                          inputs_embeds=inputs_embeds,
-                          labels=labels,
-                          output_attentions=output_attentions,
-                          output_hidden_states=output_hidden_states,
-                          return_dict=return_dict)
+        return self.module_dict['model'](input_ids=input_ids,
+                                         attention_mask=attention_mask,
+                                         inputs_embeds=inputs_embeds,
+                                         labels=labels,
+                                         output_attentions=output_attentions,
+                                         output_hidden_states=output_hidden_states,
+                                         return_dict=return_dict)
 
     def eval_modus(self):
         return EvalMLM(self)
@@ -204,7 +113,7 @@ class MaskedLanguageModel(nn.Module):
             batch = [list(b) for b in batch]
         encoded = self.tokenizer.batch_encode_plus(batch, return_tensors='pt', truncation=True, padding=True)
         input_ids: torch.Tensor = encoded['input_ids']
-        encoded['mask_idx_sent'], encoded['mask_idx_word'] = (input_ids == self.tokenizer.mask_token_id)\
+        encoded['mask_idx_sent'], encoded['mask_idx_word'] = (input_ids == self.tokenizer.mask_token_id) \
             .nonzero(as_tuple=True)
         return encoded.to(DEVICE)
 
@@ -215,6 +124,15 @@ class MaskedLanguageModel(nn.Module):
         """
         if isinstance(batch, np.ndarray):
             batch = [list(b) for b in batch]
+
+        # make sure the span cannot be combined with another token
+        for s_idx in range(len(batch)):
+            for i in range(2, len(batch[s_idx]), 2):
+                if not batch[s_idx][i].startswith(' '):
+                    batch[s_idx][i] = ' ' + batch[s_idx][i]
+            for i in range(0, len(batch[s_idx]) - 1, 2):
+                if not batch[s_idx][i].endswith(' '):
+                    batch[s_idx][i] = batch[s_idx][i] + ' '
 
         encoded = self.tokenize([''.join(s) for s in batch])
 
@@ -231,24 +149,37 @@ class MaskedLanguageModel(nn.Module):
         sentences_lower = [[s.lower().replace(' ', '') for s in sent_part] for sent_part in batch]
         all_word_parts = [[w.lower().replace(' ', '') for w in word_part] for word_part in all_word_parts]
 
-        all_spans = []
+        all_spans = [[] for _ in range(len(sentences_lower))]
         for s_idx in range(len(sentences_lower)):
-            text, start = '', 0
-            while text != sentences_lower[s_idx][0]:
-                text += all_word_parts[s_idx][start].strip()
-                start += 1
-            text, end = '', start
-            while text != sentences_lower[s_idx][1]:
-                text += all_word_parts[s_idx][end]
-                end += 1
+            start = 0
+            for i in range(0, len(batch[s_idx]) - 1, 2):
+                text = ''
+                while text != sentences_lower[s_idx][i]:
+                    text += all_word_parts[s_idx][start] #.strip()
+                    start += 1
+                text, end = '', start
+                while text != sentences_lower[s_idx][i + 1]:
+                    text += all_word_parts[s_idx][end]
+                    end += 1
+                all_spans[s_idx].append([start, end])
+                start = end
 
-            all_spans.append([start, end])
 
-        all_spans = [[encoded.word_to_tokens(s_idx, start).start, encoded.word_to_tokens(s_idx, end - 1).end]
-                     for s_idx, (start, end) in enumerate(all_spans)]
 
-        encoded['word_spans'] = torch.IntTensor(all_spans)
+
+        all_spans = [[[encoded.word_to_tokens(s_idx, start).start, encoded.word_to_tokens(s_idx, end - 1).end]
+                      for start, end in span_parts] for s_idx, span_parts in enumerate(all_spans)]
+
+        span_idx_sent, span_idx_words = [], []
+        for s_idx, sent_spans in enumerate(all_spans):
+            for word_spans in sent_spans:
+                span_idx_sent.append(s_idx)
+                span_idx_words.append(word_spans)
+
+        encoded['span_idx_sent'] = torch.IntTensor(span_idx_sent)
+        encoded['span_idx_words'] = torch.IntTensor(span_idx_words)
         return encoded.to(DEVICE)
+
 
     def get_hidden_states(self, encoded: BatchEncoding) -> torch.Tensor:
         """
@@ -281,26 +212,44 @@ class MaskedLanguageModel(nn.Module):
 
         return embeddings
 
-    def get_span_embeddings(self, encoding_with_spans: BatchEncoding, layer: int = None) -> torch.Tensor:
-        """
-        desc
-        """
-        if not hasattr(encoding_with_spans, 'word_spans'):
+    def get_span_embeddings(self, encoding_with_spans: BatchEncoding, layer: int = None, reduce='mean',
+                            return_hidden_states=False) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        if not hasattr(encoding_with_spans, 'span_idx_sent'):
             raise ValueError('Please use tokenize_with_spans() to add spans.')
 
-        span = encoding_with_spans['word_spans']
+        span_idx_sent = encoding_with_spans['span_idx_sent']
+        span_idx_words = encoding_with_spans['span_idx_words']
 
-        # embeddings: (bs, seq_length, n_layers, dim)
-        embeddings = self.get_hidden_states(encoding_with_spans)
-        bs = embeddings.size()[0]
+        # hidden_states: (bs, seq_length, n_layers, dim)
+        hidden_states = self.get_hidden_states(encoding_with_spans)
 
-        # output: (bs, n_layers, dim), use word spans to get the mean in the sequence axis
-        embeddings = torch.stack([embeddings[i, span[i, 0]:span[i, 1]].mean(dim=0) for i in range(bs)])
-        # get layer is required
+        # embeddings: n_spans x (**span_length, n_layers, dim), use word spans to get the mean in the sequence axis
+        embeddings = [hidden_states[sent_idx, span_idx_words[i, 0]:span_idx_words[i, 1]]
+                      for i, sent_idx in enumerate(span_idx_sent)]
+
+        # embeddings: n_spans x (n_layers, dim), use word spans to get the mean in the sequence axis
+        if reduce == 'mean':
+            # output: (n_spans, n_layers, dim), use word spans to get the mean in the sequence axis
+            embeddings = torch.stack([e.mean(dim=0) for e in embeddings])
+        elif reduce == 'first':
+            # output: (n_spans, n_layers, dim), use word spans to get the mean in the sequence axis
+            embeddings = torch.stack([e[0] for e in embeddings])
+        elif reduce == 'both':
+            # output: (2, n_spans, n_layers, dim), use word spans to get the mean in the sequence axis
+            embeddings_first = torch.stack([e[0] for e in embeddings])
+            embeddings_mean = torch.stack([e.mean(dim=0) for e in embeddings])
+            embeddings = torch.stack((embeddings_first, embeddings_mean))
+        else:
+            raise ValueError(f"Value '{reduce}' is not a valid setting, use one of ['mean', 'first']")
+
         if layer is not None:
-            embeddings = embeddings[:, layer]
+            embeddings = embeddings[..., layer, :]
+            hidden_states = hidden_states[..., layer, :]
 
-        return embeddings
+        if return_hidden_states:
+            return embeddings, hidden_states
+        else:
+            return embeddings
 
     def get_word_probabilities(self, encoding: BatchEncoding, word_ids: list[int] = None) -> torch.Tensor:
         # (bs, seq_length, vocabulary or n_word_ids)
@@ -321,16 +270,39 @@ class MaskedLanguageModel(nn.Module):
             # list[ (n_masks, vocabulary or n_word_ids) ]
             return result
 
+    def get_coref_predictions(self,
+                              encoding_with_spans: BatchEncoding,
+                              subject_indices: Union[list[int], torch.Tensor]):
+        # (n_spans, dim)
+        embeddings = self.get_span_embeddings(encoding_with_spans, layer=-1, reduce='first')
+        dims = embeddings.size()
+        # (n_sentences, 2, dim)
+        embeddings = embeddings.reshape(dims[0] // 2, 2, dims[1])
+
+        if not isinstance(subject_indices, torch.Tensor):
+            subject_indices = torch.tensor(subject_indices)
+        subject_indices = subject_indices.long()
+
+        # ordered for subject/pronoun: (2, n_sentences, dim)
+        embeddings = torch.stack((embeddings[range(len(subject_indices)), subject_indices],
+                                  embeddings[range(len(subject_indices)), 1 - subject_indices]))
+        # (n_sentences, 2 x dim)
+        embeddings = embeddings.permute((1, 0, 2)).flatten(start_dim=-2, end_dim=-1)
+
+        return self.module_dict['coreference-resolution'](embeddings)
+
+
     """ PRINTING """
+
     def __str__(self) -> str:
-        return f"Model({self.config})"
+        return f"MLM(params={list(self.module_dict.keys())}, config={self.config})"
 
     def __repr__(self) -> str:
         return str(self)
 
 
 class EvalMLM(nn.Module):
-    def __init__(self, model: MaskedLanguageModel):
+    def __init__(self, model: MLM):
         super().__init__()
         self.model = model
 
@@ -389,64 +361,38 @@ class EvalMLM(nn.Module):
         return self.model
 
 
-class BaseMLM(MaskedLanguageModel):
-    def load_model(self, parameters: dict) -> nn.Module:
-        if parameters is None or len(parameters) == 0:
-            model = AutoModelForMaskedLM.from_pretrained(self.config.model_name)
-        else:
-            raise ValueError(f"Loading custom parameters is not allowed for model_type='base'")
-        for param in model.parameters():
-            param.requires_grad = False
-        return model
-
-    def get_parameters(self) -> nn.Module:
-        return nn.Module()
+class BaseMLM(MLM):
+    def __init__(self, config: ModelConfig, task: str, modules: nn.ModuleDict = None):
+        super().__init__(config, task, modules)
+        if self.task == 'coreference-resolution':
+            unfreeze(self.module_dict)
+            self.parameters_dict = self.module_dict
 
 
-class FineTuneMLM(MaskedLanguageModel):
-    def load_model(self, parameters: dict) -> nn.Module:
-        if parameters is None:
-            model = AutoModelForMaskedLM.from_pretrained(self.config.model_name)
-        else:
-            model = parameters
-
-        for param in model.parameters():
-            param.requires_grad = True
-
-        return model
-
-    def get_parameters(self) -> nn.Module:
-        return self.model
+class FineTuneMLM(MLM):
+    def __init__(self, config: ModelConfig, task: str, modules: nn.ModuleDict = None):
+        super().__init__(config, task, modules)
+        for module in self.module_dict.values():
+            unfreeze(module)
+        self.parameters_dict = self.module_dict
 
 
-class PrefixMLM(MaskedLanguageModel):
-    def __init__(self, config: Union[dict, Config], parameters=None, **kwargs):
-        self.prefix_embeddings = None
-        super().__init__(config, parameters, **kwargs)
+class PrefixMLM(MLM):
+    def __init__(self, config: ModelConfig, task: str, modules: nn.ModuleDict = None):
+        super().__init__(config, task, modules)
 
-    def load_model(self, parameters: dict) -> nn.Module:
-        model = AutoModelForMaskedLM.from_pretrained(self.config.model_name)
-
-        if parameters is None:
-            self.prefix_embeddings = PrefixEmbeddings(total_layers=self.total_layers, dim=self.dim,
-                                                      **self.config.to_dict())
-        else:
-            self.prefix_embeddings = parameters
+        if 'prefix_embeddings' not in self.module_dict:
+            self.module_dict['prefix_embeddings'] = PrefixEmbeddings(total_layers=self.total_layers, dim=self.dim,
+                                                                     **self.config.to_dict())
 
         # initialize prefix module to interact with the model
-        PrefixModule.add_to(self.config.model_name, model, self.prefix_embeddings)
+        PrefixModule.add_to(self.config.model_name, self.module_dict['model'], self.module_dict['prefix_embeddings'])
 
-        # freeze model
-        for param in model.parameters():
-            param.requires_grad = False
-        # unfreeze prefix
-        for param in self.prefix_embeddings.parameters():
-            param.requires_grad = True
+        for module_name, module in self.module_dict.items():
+            if module_name != 'model':
+                unfreeze(module)
 
-        return model
-
-    def get_parameters(self) -> nn.Module:
-        return self.prefix_embeddings
+        self.parameters_dict = nn.ModuleDict({k: v for k, v in self.module_dict.items() if k != 'model'})
 
 
 class PrefixEmbeddings(nn.Module):
@@ -480,10 +426,10 @@ class PrefixEmbeddings(nn.Module):
                              f"It should be smaller or equal to '{total_layers}'.")
         if self.insert_layer == total_layers - 1:
             raise ValueError(f"Value '{prefix_layers}' for prefix_layers is too large. "
-                             f"It should be smaller or equal to than '{total_layers-2}'.")
+                             f"It should be smaller or equal to than '{total_layers - 2}'.")
         if self.insert_layer >= total_layers:
             raise ValueError(f"Value '{prefix_layers}' for prefix_layers is too small. "
-                             f"It should be smaller or equal to than '{total_layers-2}'.")
+                             f"It should be smaller or equal to than '{total_layers - 2}'.")
 
         self.prefix_embeddings_insert = torch.nn.Parameter(nn.init.normal_(torch.empty(n_prefix_tokens, dim), std=0.5))
         self.prefix_embeddings_layer = None
@@ -548,13 +494,12 @@ class PrefixEmbeddings(nn.Module):
 
     def regularization(self) -> torch.Tensor:
         # x: (bs, ..., seq_length + prefix_length, dim)
-        loss = (self.prefix_embeddings_insert.data ** 2).mean()
-        layers = self.total_layers - self.insert_layer - 1
+        loss = (self.prefix_embeddings_insert.data ** 2).sum()
         if self.prefix_mode == 'replace':
-            loss += (self.prefix_embeddings_layer.data ** 2).mean() * layers
+            loss += (self.prefix_embeddings_layer.data ** 2).sum()
         elif self.prefix_mode == 'linear':
-            loss += ((self.prefix_embeddings_layer[:, 0].data - 1) ** 2).mean() * layers
-            loss += (self.prefix_embeddings_layer[:, 1].data ** 2).mean() * layers
+            loss += ((self.prefix_embeddings_layer[:, 0].data - 1) ** 2).sum()
+            loss += (self.prefix_embeddings_layer[:, 1].data ** 2).sum()
         return loss
 
     def clean(self, layer: int, x: torch.Tensor):
@@ -609,7 +554,6 @@ class PrefixModule(nn.Module):
 class PrefixDistilbert(PrefixModule):
     def __init__(self, model: DistilBertForMaskedLM, prefix_embeddings: PrefixEmbeddings):
         super().__init__(prefix_embeddings)
-        self.n_layers = model.distilbert.transformer.total_layers
         self.layer = model.distilbert.transformer.layer
 
     def add_to_model(self, model):
