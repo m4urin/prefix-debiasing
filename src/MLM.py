@@ -10,7 +10,7 @@ from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPa
 
 from src.utils import get_one_of_attributes, tbatched
 from src.utils.user_dicts import ModelConfig
-from src.utils.pytorch import repeat_stacked, DEVICE, freeze, unfreeze, count_parameters
+from src.utils.pytorch import repeat_stacked, DEVICE, freeze, unfreeze, count_parameters, is_frozen
 
 
 class Tokenizers:
@@ -55,19 +55,18 @@ class MLM(nn.Module):
                         ('f2', nn.Linear(20, 1))]))
 
         # freeze all parameters
-        for m in self.module_dict.values():
-            freeze(m)
+        freeze(self.module_dict)
 
-        # parameters to save
+        # no parameters to save
         self.parameters_dict = nn.ModuleDict()
 
     @property
     def n_parameters(self):
-        return count_parameters(self.parameters_dict.values())
+        return count_parameters(self.parameters_dict)
 
     """ STATIC METHODS """
     @staticmethod
-    def get_test_model(model_name='distilbert-base-uncased', model_type='finetune'):
+    def get_test_model(model_name='distilbert-base-uncased', model_type='finetune', task='default'):
         if model_type == 'finetune':
             config = ModelConfig(model_name=model_name, model_type='finetune',
                                  loss_function='kaneko', epochs=1, batch_size=32, lr=0.00002, num_warmup_steps=2,
@@ -79,7 +78,7 @@ class MLM(nn.Module):
                                  seed=42)
         else:
             config = ModelConfig(model_name=model_name, model_type='base')
-        return MLM.from_config(config, 'default').to(DEVICE)
+        return MLM.from_config(config, task).to(DEVICE)
 
     @staticmethod
     def from_config(config: ModelConfig, task: str, modules: nn.ModuleDict = None):
@@ -179,7 +178,6 @@ class MLM(nn.Module):
         encoded['span_idx_sent'] = torch.IntTensor(span_idx_sent)
         encoded['span_idx_words'] = torch.IntTensor(span_idx_words)
         return encoded.to(DEVICE)
-
 
     def get_hidden_states(self, encoded: BatchEncoding) -> torch.Tensor:
         """
@@ -291,74 +289,19 @@ class MLM(nn.Module):
 
         return self.module_dict['coreference-resolution'](embeddings)
 
-
-    """ PRINTING """
-
     def __str__(self) -> str:
-        return f"MLM(params={list(self.module_dict.keys())}, config={self.config})"
+        config_info = str(self.config).replace('\n', '\n\t')
+        modules_info = ', '.join([f"'{k}' ({is_frozen(v)})" for k, v in self.module_dict.items()])
+        parameters_info = ', '.join([f"'{k}' ({is_frozen(v)})" for k, v in self.parameters_dict.items()])
+        return f"MLM (\n" \
+               f"\t{config_info}\n" \
+               f"\ttask={self.task}\n" \
+               f"\tmodule_dict=[{modules_info}]\n" \
+               f"\tparameters_dict=[{parameters_info}]\n" \
+               f")"
 
     def __repr__(self) -> str:
         return str(self)
-
-
-class EvalMLM(nn.Module):
-    def __init__(self, model: MLM):
-        super().__init__()
-        self.model = model
-
-    def embed_sentences(self, sentences: list[str], batch_size=32) -> torch.Tensor:
-        """
-        Embed a list of sentences to be evaluated
-        sentences: a list of individual sentences
-        returns: tensor of size (n_sentences, embedding_dim)
-        """
-        with torch.no_grad():
-            sentence_embeddings = []
-            for sent_batch in tbatched(sentences, batch_size=batch_size, desc=f'Embed sentences (bs={batch_size}, '
-                                                                              f'model={self.model.config.model_name})'):
-                encoded = self.model.tokenize(sent_batch)
-                embeddings = self.model.get_sentence_embeddings(encoded, layer=-1)  # (bs, dim)
-                sentence_embeddings.append(embeddings.cpu())
-            return torch.cat(sentence_embeddings, dim=0)
-
-    def embed_sentences_dict(self, sentences: dict[list[str]], batch_size=32) -> dict[torch.Tensor]:
-        """
-        Embed a list of sentences to be evaluated
-        sentences: a list of individual sentences
-        returns: tensor of size (n_sentences, embedding_dim)
-        """
-        sentences_flattened = sum([sent_list for k, sent_list in sentences.items()], [])
-        embeddings_flattened = self.embed_sentences(sentences_flattened, batch_size=batch_size)
-        result = {}
-        c = 0
-        for i, (k, sent_list) in enumerate(sentences.items()):
-            result[k] = embeddings_flattened[c:c + len(sent_list)]
-            c += len(sent_list)
-        return result
-
-    def mask_probabilities(self, sentences: list[str], words: list[str], batch_size=32) -> torch.Tensor:
-        """
-        Get the probabilities of first [MASK] token for the specific words.
-        text: sentences: a list of individual sentences containing one or more mask tokens.
-        returns: any ndarray/tensor of size list[(n_sentences, n_masks, n_words)] of size n_sentences
-        """
-        with torch.no_grad():
-            word_ids = self.model.tokenizer.convert_tokens_to_ids(words)
-            for w, wid in zip(words, word_ids):
-                if wid == self.model.tokenizer.unk_token_id:
-                    raise Exception(f"'{w}' cannot be encoded to a single token")
-            sentences = [s.replace('[MASK]', self.model.tokenizer.mask_token_id) for s in sentences]
-            probabilities = []
-            for sent_batch in tbatched(sentences, batch_size=batch_size, desc=f'Mask probabilities (bs={batch_size}, '
-                                                                              f'model={self.model.config.model_name})'):
-                encoded = self.model.tokenize(sent_batch)
-                # (bs, n_masks, n_word_ids)
-                p = self.model.get_mask_probabilities(encoded, word_ids, output_tensor=True)
-                probabilities.append(p.cpu())
-            return torch.cat(probabilities, dim=0)  # (n_sentences, n_masks, n_word_ids)
-
-    def train_modus(self):
-        return self.model
 
 
 class BaseMLM(MLM):
@@ -372,8 +315,7 @@ class BaseMLM(MLM):
 class FineTuneMLM(MLM):
     def __init__(self, config: ModelConfig, task: str, modules: nn.ModuleDict = None):
         super().__init__(config, task, modules)
-        for module in self.module_dict.values():
-            unfreeze(module)
+        unfreeze(self.module_dict)
         self.parameters_dict = self.module_dict
 
 
@@ -388,11 +330,10 @@ class PrefixMLM(MLM):
         # initialize prefix module to interact with the model
         PrefixModule.add_to(self.config.model_name, self.module_dict['model'], self.module_dict['prefix_embeddings'])
 
-        for module_name, module in self.module_dict.items():
-            if module_name != 'model':
-                unfreeze(module)
-
         self.parameters_dict = nn.ModuleDict({k: v for k, v in self.module_dict.items() if k != 'model'})
+
+        freeze(self.module_dict)
+        unfreeze(self.parameters_dict)
 
 
 class PrefixEmbeddings(nn.Module):
@@ -731,3 +672,64 @@ class PrefixRoberta(PrefixModule):
             attentions=all_self_attentions,
             cross_attentions=all_cross_attentions,
         )
+
+
+class EvalMLM(nn.Module):
+    def __init__(self, model: MLM):
+        super().__init__()
+        self.model = model
+
+    def embed_sentences(self, sentences: list[str], batch_size=32) -> torch.Tensor:
+        """
+        Embed a list of sentences to be evaluated
+        sentences: a list of individual sentences
+        returns: tensor of size (n_sentences, embedding_dim)
+        """
+        with torch.no_grad():
+            sentence_embeddings = []
+            for sent_batch in tbatched(sentences, batch_size=batch_size, desc=f'Embed sentences (bs={batch_size}, '
+                                                                              f'model={self.model.config.model_name})'):
+                encoded = self.model.tokenize(sent_batch)
+                embeddings = self.model.get_sentence_embeddings(encoded, layer=-1)  # (bs, dim)
+                sentence_embeddings.append(embeddings.cpu())
+            return torch.cat(sentence_embeddings, dim=0)
+
+    def embed_sentences_dict(self, sentences: dict[str, list[str]], batch_size=32) -> dict[torch.Tensor]:
+        """
+        Embed a list of sentences to be evaluated
+        sentences: a list of individual sentences
+        returns: tensor of size (n_sentences, embedding_dim)
+        """
+        with torch.no_grad():
+            sentences_flattened = sum([sent_list for _, sent_list in sentences.items()], [])
+            embeddings_flattened = self.embed_sentences(sentences_flattened, batch_size=batch_size)
+            result = {}
+            c = 0
+            for i, (k, sent_list) in enumerate(sentences.items()):
+                result[k] = embeddings_flattened[c:c + len(sent_list)]
+                c += len(sent_list)
+            return result
+
+    def mask_probabilities(self, sentences: list[str], words: list[str], batch_size=32) -> torch.Tensor:
+        """
+        Get the probabilities of first [MASK] token for the specific words.
+        text: sentences: a list of individual sentences containing one or more mask tokens.
+        returns: any ndarray/tensor of size list[(n_sentences, n_masks, n_words)] of size n_sentences
+        """
+        with torch.no_grad():
+            word_ids = self.model.tokenizer.convert_tokens_to_ids(words)
+            for w, wid in zip(words, word_ids):
+                if wid == self.model.tokenizer.unk_token_id:
+                    raise Exception(f"'{w}' cannot be encoded to a single token")
+            sentences = [s.replace('[MASK]', self.model.tokenizer.mask_token_id) for s in sentences]
+            probabilities = []
+            for sent_batch in tbatched(sentences, batch_size=batch_size, desc=f'Mask probabilities (bs={batch_size}, '
+                                                                              f'model={self.model.config.model_name})'):
+                encoded = self.model.tokenize(sent_batch)
+                # (bs, n_masks, n_word_ids)
+                p = self.model.get_mask_probabilities(encoded, word_ids, output_tensor=True)
+                probabilities.append(p.cpu())
+            return torch.cat(probabilities, dim=0)  # (n_sentences, n_masks, n_word_ids)
+
+    def train_modus(self):
+        return self.model

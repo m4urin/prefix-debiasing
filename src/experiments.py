@@ -4,7 +4,7 @@ from src.trainers import Trainer
 from src.utils import dataframe_from_dicts, flatten_dict, print_title, stack_dicts
 from src.utils.io import DATA_DIR
 from src.utils.pytorch import DEVICE
-from src.utils.user_dicts import TASKS, ExperimentResult
+from src.utils.user_dicts import EXCLUDE_TRAINING, ExperimentResult
 from copy import deepcopy
 
 
@@ -43,7 +43,14 @@ class ExperimentTracker:
             .get_folder(self.name, create_if_not_exist=True)
         config_file = self.work_dir.read_file('config.json')
         self.configs = configs_from_hyper_parameters(config_file)
-        self.tasks = config_file['tasks']
+
+        if 'tasks' not in config_file:
+            self.tasks = []
+        elif isinstance(config_file['tasks'], str):
+            self.tasks = [config_file['tasks']]
+        else:
+            self.tasks = config_file['tasks']
+        self.tasks = ['default'] + list(set([k for k in self.tasks if k != 'default']))
 
     def run_experiment(self, redo_training=None, redo_eval=None):
         # for tasks
@@ -57,16 +64,15 @@ class ExperimentTracker:
             if self.cache.file_exists(file_name):
                 data = self.cache.read_file(file_name)
             else:
-                data = {'config': config}
+                data = {'config': config.to_dict()}
             result = ExperimentResult.from_dict(data)
 
             for task_name in self.tasks:
                 task_result = result.task[task_name]
                 print(f"\n{task_name}: {config}")
-                can_train = config.model_type not in TASKS[task_name]
                 force_training = task_name in redo_training
                 force_evaluation = task_name in redo_eval
-                do_training = can_train and (force_training or not task_result.train_info.training_completed)
+                do_training = force_training or not task_result.train_info.training_completed
                 do_evaluation = do_training or force_evaluation or len(task_result.evaluations) == 0
 
                 model = None
@@ -78,14 +84,18 @@ class ExperimentTracker:
                     else:
                         print(f'   No parameters found, train model..')
                     parameters = None
-                    if task_name == 'coreference-resolution':
+                    if task_name != 'default':
                         parameters = deepcopy(result.task['default'].parameters)
                         if parameters is None:
                             raise ValueError('Default parameters not present..')
                         else:
                             print('Using parameters from default.')
                     model = MLM.from_config(config, task_name, parameters).to(DEVICE)
-                    task_result.train_info = Trainer.run(task_name, model)
+                    if config.model_type not in EXCLUDE_TRAINING[task_name]:
+                        task_result.train_info = Trainer.run(task_name, model)
+                    else:
+                        print('This model is not trainable.. Skip training.')
+                        task_result.train_info.training_completed = True
                     task_result.parameters = model.parameters_dict
                     self.cache.write_file(file_name, result.to_dict())
                 else:
@@ -98,6 +108,7 @@ class ExperimentTracker:
                         print(f'   No evaluations found, evaluate model..')
                     if not do_training:
                         model = MLM.from_config(config, task_name, task_result.parameters).to(DEVICE)
+                        print('model before evaluation and loaded from file:\n', model, '\n\n')
                     task_result.evaluations = run_metrics(task_name, model)
                     self.cache.write_file(file_name, result.to_dict())
                 else:

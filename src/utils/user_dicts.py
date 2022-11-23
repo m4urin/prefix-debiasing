@@ -8,7 +8,7 @@ MODEL_TYPES = ['base', 'finetune', 'prefix']
 PREFIX_MODES = ['identity', 'linear', 'replace']
 PREFIX_LAYERS = ['all', 'half']
 LOSS_FUNCTIONS = ['kaneko']
-TASKS = {'default': {'base'}, 'coreference-resolution': set()}  # 'sentiment-analysis'
+EXCLUDE_TRAINING = {'default': {'base'}, 'coreference-resolution': set()}  # 'sentiment-analysis'
 
 
 class UserDict:
@@ -216,7 +216,7 @@ class ExperimentResult(UserDict):
         task = {}
         if 'task' in data and len(data['task']) > 0:
             task = {k: TaskResult.from_dict(v) for k, v in data['task'].items()}
-        for t in TASKS.keys():
+        for t in EXCLUDE_TRAINING.keys():
             if t not in task:
                 task[t] = TaskResult()
         return ExperimentResult(config, task)

@@ -9,10 +9,15 @@ from torch.utils.data import Dataset
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-def count_parameters(modules: Union[Iterable[nn.Module], nn.Module]):
+def count_parameters(modules: Union[nn.Module, nn.ModuleDict]):
     if isinstance(modules, nn.Module):
-        modules = [modules]
-    return sum(sum(p.numel() for p in m.parameters()) for m in modules)
+        modules_to_process = [modules]
+    elif isinstance(modules, nn.ModuleDict):
+        modules_to_process = modules.values()
+    else:
+        raise ValueError("Arg 'modules' must be 'nn.Module' or 'nn.ModuleDict'.")
+
+    return sum(sum(p.numel() for p in module.parameters()) for module in modules_to_process)
 
 
 def repeat_stacked(x: torch.Tensor, n: int):
@@ -48,39 +53,65 @@ class TensorsDataset(Dataset):
         return self.x[idx], self.y[idx]
 
 
-def freeze(modules: Union[nn.Module, nn.ModuleDict], exception: list[str] = None) -> nn.Module:
+def set_grad(_bool: bool,
+             modules: Union[nn.Module, nn.ModuleDict],
+             exception: Union[str, list[str]] = None):
     if isinstance(modules, nn.Module):
         modules_to_freeze = [modules]
     elif isinstance(modules, nn.ModuleDict):
         modules_to_freeze = modules.values()
     else:
         raise ValueError("Arg 'modules' must be 'nn.Module' or 'nn.ModuleDict'.")
+
     if exception is None:
         exception = []
-    for m in modules_to_freeze:
-        m.requires_grad = False
-        for param in m.parameters():
-            param.requires_grad = False
-        for name, param in m.named_parameters():
+    elif isinstance(exception, str):
+        exception = [exception]
+
+    # set grad
+    for module in modules_to_freeze:
+        module.requires_grad = _bool
+        for param in module.parameters():
+            param.requires_grad = _bool
+
+    # exception
+    for module in modules_to_freeze:
+        for name, param in module.named_parameters():
             if name in exception:
-                param.requires_grad = True
+                param.requires_grad = not _bool
     return modules
 
 
-def unfreeze(modules: Union[nn.Module, nn.ModuleDict], exception: list[str] = None) -> nn.Module:
+def freeze(modules: Union[nn.Module, nn.ModuleDict],
+           exception: Union[str, list[str]] = None):
+    return set_grad(False, modules, exception)
+
+
+def unfreeze(modules: Union[nn.Module, nn.ModuleDict],
+             exception: Union[str, list[str]] = None):
+    return set_grad(True, modules, exception)
+
+
+def is_frozen(modules: Union[nn.Module, nn.ModuleDict]):
     if isinstance(modules, nn.Module):
-        modules_to_freeze = [modules]
+        modules_to_process = [modules]
     elif isinstance(modules, nn.ModuleDict):
-        modules_to_freeze = modules.values()
+        modules_to_process = modules.values()
     else:
         raise ValueError("Arg 'modules' must be 'nn.Module' or 'nn.ModuleDict'.")
-    if exception is None:
-        exception = []
-    for m in modules_to_freeze:
-        m.requires_grad = True
-        for param in m.parameters():
-            param.requires_grad = True
-        for name, param in m.named_parameters():
-            if name in exception:
-                param.requires_grad = False
-    return modules
+
+    has_true_grad = False
+    has_false_grad = False
+    for module in modules_to_process:
+        for param in module.parameters():
+            if param.requires_grad:
+                has_true_grad = True
+            else:
+                has_false_grad = True
+            if has_true_grad and has_false_grad:
+                return 'partially frozen'
+    if not has_true_grad and not has_false_grad:
+        return 'no parameters'
+    if has_true_grad:
+        return 'unfrozen'
+    return 'frozen'

@@ -3,12 +3,12 @@
   "model_type": ["base", "finetune", "prefix"],
   "prefix_mode": ["linear"],
   "prefix_layers": ["all"],
-  "n_prefix_tokens": [4, 6, 8, 12, 16],
+  "n_prefix_tokens": [4, 8, 16, 24, 32],
   "batch_size": 32,
-  "lr": {"finetune": 0.00003, "prefix": 0.001},
+  "lr": {"finetune": 0.00003, "prefix": 0.0005},
   "epochs": 3,
   "loss_function": ["kaneko"],
-  "num_warmup_steps": 200,
+  "num_warmup_steps": 100,
   "seed":42,
-  "tasks": ["default", "coreference-resolution"]
+  "tasks": ["coreference-resolution"]
 }

@@ -109,12 +109,12 @@ class OrthogonalTrainer(Trainer):
         result.add_scalar(f'loss/embedding_regularization', embedding_regularization_loss.item())
 
         # (bs/2, n_layers, dim)
-        orthogonal_loss = 0.1 * (torch.einsum('ald,tld->atl', data['v_a'], target_new) ** 2).sum()
+        orthogonal_loss = 0.08 * (torch.einsum('ald,tld->atl', data['v_a'], target_new) ** 2).sum()
         result.add_scalar(f'loss/orthogonal', orthogonal_loss.item())
 
         prefix_regularization = 0
         if model.config.is_prefix():
-            prefix_regularization = 0.01 * model.prefix_embeddings.regularization()
+            prefix_regularization = 0.02 * model.module_dict['prefix_embeddings'].regularization()
             result.add_scalar(f'loss/prefix_regularization', prefix_regularization.item())
 
         total_loss = orthogonal_loss + embedding_regularization_loss + prefix_regularization
@@ -225,9 +225,9 @@ class CorefTrainer(Trainer):
         data = self.prepare_data(model.config)
         total_steps = self.calc_total_steps(data, model.config)
 
-        freeze(model)
+        freeze(model.module_dict)
         unfreeze(model.parameters_dict['coreference-resolution'])
-        optimizer = AdamW(params=model.parameters_dict['coreference-resolution'].parameters(), lr=0.0005)
+        optimizer = AdamW(params=model.parameters_dict['coreference-resolution'].parameters(), lr=0.0002)
         scheduler = get_linear_schedule_with_warmup(optimizer=optimizer,
                                                     num_warmup_steps=40,
                                                     num_training_steps=2 + int(total_steps/self.epochs))
@@ -242,7 +242,7 @@ class CorefTrainer(Trainer):
 
             if epoch == 1:
                 unfreeze(model.parameters_dict)
-                optimizer = AdamW(params=model.parameters_dict.parameters(), lr=0.00005)
+                optimizer = AdamW(params=model.parameters_dict.parameters(), lr=0.00002)
                 scheduler = get_linear_schedule_with_warmup(optimizer=optimizer,
                                                             num_warmup_steps=100,
                                                             num_training_steps=2 + int(total_steps *
