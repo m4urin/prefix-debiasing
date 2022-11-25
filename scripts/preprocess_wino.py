@@ -6,13 +6,13 @@ from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
 from src.utils import stack_dicts
-from src.utils.io import DATA_DIR
+from src.utils.files import DATA_DIR
 
 eval_folder = DATA_DIR['eval/winogender']
 train_folder = DATA_DIR['train/coref']
 
 train_data = {'sentence': [], 'subject_idx': [], 'label': []}
-MAX_LENGTH = 400
+MAX_LENGTH = 420
 
 dataset = load_dataset('gap')
 dataset = concatenate_datasets([dataset['train'], dataset['test'], dataset['validation']])
@@ -128,11 +128,12 @@ for i, (occupation, participant, label, sentence) in tqdm(templates_df.iterrows(
 
 """ WRITE TO FILES """
 train_data = Dataset.from_dict(train_data)
-train, test = train_test_split(train_data, test_size=500, shuffle=True, random_state=42)
+train, test = train_test_split(train_data, test_size=400, shuffle=True, random_state=42)
 train, test = Dataset.from_dict(train), Dataset.from_dict(test)
 
 train_folder.write_file('coref_train.parquet', train)
 train_folder.write_file('coref_test.parquet', test)
+DATA_DIR['eval/coref'].write_file('coref_test.parquet', test)
 eval_folder.write_file('wino_gender_test.parquet', Dataset.from_dict(stack_dicts(gender_data)))
 
 for f in ['train/coref/coref_train.parquet',

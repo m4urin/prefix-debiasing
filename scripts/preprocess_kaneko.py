@@ -7,7 +7,9 @@ from tqdm import trange, tqdm
 from unidecode import unidecode
 
 from src.MLM import MLM, BaseMLM
-from src.utils import fix_string_dataset, DATA_DIR, DEVICE
+from src.utils.files import DATA_DIR
+from src.utils.pytorch import fix_string_batch, DEVICE
+from src.utils.config import ModelConfig
 
 
 def word_list_regex(words: list[str]):
@@ -47,8 +49,8 @@ def preprocess_raw_data():
 
         k = min(len(A), len(S))
 
-        A = A[:int(k * 0.8)]  # remove 20% longest sentences
-        S = S[:int(k * 0.8)]  # remove 20% longest sentences
+        A = A[:int(k * 0.7)]  # remove 30% longest sentences
+        S = S[:int(k * 0.7)]  # remove 30% longest sentences
 
         return A, S
 
@@ -69,7 +71,7 @@ def calc_v_a(model: MLM, batch_size=32):
         for x in tqdm(DataLoader(DATA_DIR['train/kaneko'].read_file('attributes.parquet'),
                                  batch_size=batch_size),
                       desc=f'V_a for {model.config.model_name}'):
-            x = fix_string_dataset(x['sentences'])
+            x = fix_string_batch(x['sentences'])
             enc = model.tokenize_with_spans(x)
             # (2, bs, n_layers, dim)
             span_embeddings = model.get_span_embeddings(enc, reduce='both').detach()
@@ -84,13 +86,13 @@ def calc_v_a(model: MLM, batch_size=32):
         v_a = [[torch.stack(v_first).mean(0), torch.stack(v_mean).mean(0)] for v_first, v_mean in v_a.values()]
         v_a = torch.stack(sum(v_a, []))
         print(v_a.size())
-        DATA_DIR['train/kaneko'].get_folder('va', create_if_not_exist=True) \
+        DATA_DIR['train/kaneko'].get_folder('va', create_if_not_exists=True) \
             .write_file(f'{model.config.model_name}.pt', v_a)
 
 
 def preprocess_v_a():
     for model_name in ["distilbert-base-uncased", "roberta-base"]:
-        model = BaseMLM(config={'model_name': model_name, 'model_type': 'base'}).to(DEVICE)
+        model = BaseMLM(ModelConfig(model_name, 'base'), 'default').to(DEVICE)
         calc_v_a(model)
 
 

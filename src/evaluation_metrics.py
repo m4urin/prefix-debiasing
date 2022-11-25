@@ -1,28 +1,22 @@
-from collections import OrderedDict
+import copy
 from math import ceil
 
 import torch
-from matplotlib import pyplot as plt
-from torch import cosine_similarity, nn
-from torch.optim import AdamW
+from torch import cosine_similarity
 from torch.utils.data import DataLoader
-from tqdm import tqdm, trange
-import copy
-
-from transformers import get_linear_schedule_with_warmup
+from tqdm import tqdm
 
 from dependencies.weat import run_test
-from sklearn.model_selection import train_test_split
 from src.MLM import MLM
-from src.utils import batched, stack_dicts, sig_notation
-from src.utils.io import DATA_DIR, IOFolder
-from src.utils.pytorch import fix_string_batch, DEVICE
+from src.utils.files import get_folder, IOFolder
+from src.utils.functions import nested_loop
+from src.utils.pytorch import fix_string_batch
 
 
 class Metric:
     def __init__(self, metric_name: str, folder_name: str):
         self.metric_name = metric_name
-        self.data = self.prepare_data(DATA_DIR['eval', folder_name])
+        self.data = self.prepare_data(get_folder(f'eval/{folder_name}'))
 
     def prepare_data(self, folder: IOFolder):
         raise NotImplementedError('Not implemented yet')
@@ -43,13 +37,13 @@ class SEAT(Metric):
         super().__init__(metric_name='seat', folder_name='seat')
 
     def prepare_data(self, folder: IOFolder):
-        return {f.name: f.read() for f in folder.get_files(extension='.json')}
+        return {f.name: f.read() for f in folder.get_all_files(extension='.json')}
 
     def eval_model(self, model: MLM) -> dict:
         with torch.no_grad():
             keys = ['targ1', 'targ2', 'attr1', 'attr2']
             result = {}
-            for test_name, test in tqdm(self.data.items(), desc=f'   SEAT'):
+            for test_name, test in nested_loop(self.data.items(), progress_bar=f'SEAT'):
                 encoded_sentences = model.tokenize(sum([test[t]['examples'] for t in keys], []))
                 sentences_embedded = model.get_sentence_embeddings(encoded_sentences, layer=-1).cpu()  # (bs, dim)
                 c = 0
@@ -75,7 +69,7 @@ class LPBS(Metric):
         super().__init__(metric_name='lpbs', folder_name='lpbs')
 
     def prepare_data(self, folder: IOFolder):
-        return {f.name: f.read() for f in folder.get_files(extension='.json')}
+        return {f.name: f.read() for f in folder.get_all_files(extension='.json')}
 
     def eval_model(self, model: MLM) -> dict:
         with torch.no_grad():
@@ -110,7 +104,7 @@ class LPBS(Metric):
                 for subtest in test['tests']:
                     total_iterations += ceil(len(test['attributes']) * len(subtest["templates"]) / 32)
 
-            pbar = tqdm(desc=f"   LPBS", total=total_iterations)
+            pbar = tqdm(desc=f"LPBS", total=total_iterations)
             for test_name, test in files.items():
                 all_p_tgt = []
                 all_p_prior = []
@@ -143,7 +137,7 @@ class LPBS(Metric):
 
                     # (ALL_templates, n_targets)
                     p_tgt = []
-                    for batch in batched(all_templates, batch_size=32):
+                    for batch in nested_loop(all_templates, batch_size=32):
                         p = model.get_mask_probabilities(model.tokenize(batch), target_ids, output_tensor=True)[:, 0]
                         p_tgt.append(p)
                         pbar.update(1)
@@ -194,19 +188,19 @@ class WinoGenderSimilarity(Metric):
             'pronoun_class': pronoun_class,
             'subject_is_occupation': is_occupation
         """
-        batch_size = 64
-        bound_step = 0.02
-
-        iterations_emb = len(self.data) // batch_size
-        if len(self.data) % batch_size != 0:
-            iterations_emb += 1
-
-        progress_bar = tqdm(total=iterations_emb + int(2 / bound_step) - 2)
-
         with torch.no_grad():
+            batch_size = 64
+            bound_step = 0.01
+
+            iterations_emb = len(self.data) // batch_size
+            if len(self.data) % batch_size != 0:
+                iterations_emb += 1
+
+            progress_bar = tqdm(total=iterations_emb)
+
             model.eval()
             all_embeddings = []
-            progress_bar.set_description('   WinoGenderSimilarity (embeddings)')
+            progress_bar.set_description('WinoGender (similarity)')
             for x in DataLoader(self.data, batch_size=batch_size):
                 subject_indices, labels = x['subject_idx'], x['label']
                 encoding_with_spans = model.tokenize_with_spans(fix_string_batch(x['sentence']))
@@ -235,28 +229,20 @@ class WinoGenderSimilarity(Metric):
             # (n)
             sim = cosine_similarity(all_embeddings[0], all_embeddings[1], dim=-1)
             # (n)
-            y = torch.tensor(self.data['label'], dtype=torch.float32, device=DEVICE)
+            y = torch.tensor(self.data['label'], dtype=torch.float32, device=sim.device)
 
-            progress_bar.set_description('   WinoGenderSimilarity (bounds)')
             best_acc, best_bound = -1, None
-            for bound in torch.arange(1.0-bound_step, -1.0+bound_step, -bound_step):
+            for bound in torch.arange(-1.0+bound_step, 1.0, bound_step):
                 y_pred = (sim >= bound).int()
                 acc = 1.0 - torch.abs(y_pred - y).float().mean()
                 if acc > best_acc:
                     best_acc = acc.item()
                     best_bound = bound.item()
-                progress_bar.update(1)
 
-            progress_bar.set_description('   WinoGenderSimilarity (bias)')
-            # TODO
-
-
-
-            progress_bar.set_description('   WinoGenderSimilarity')
             return {'accuracy': round(100 * best_acc, 2), 'bound': round(best_bound, 2)}
 
 
-class WinoGenderFineTune(Metric):
+class WinoGender(Metric):
     def __init__(self):
         super().__init__(metric_name='winogender_finetune', folder_name='winogender')
 
@@ -277,23 +263,72 @@ class WinoGenderFineTune(Metric):
         with torch.no_grad():
             model.eval()
             y_pred = []
-            for x in tqdm(DataLoader(self.data, batch_size=64), desc='   WinoGenderFineTune'):
+            for x in tqdm(DataLoader(self.data, batch_size=32), desc='WinoGender (coref head)'):
+                enc = model.tokenize_with_spans(fix_string_batch(x['sentence']))
+                # (bs, 1)
+                logits = model.get_coref_predictions(enc, x['subject_idx'])
+                y_pred.append((logits <= 0).float())
+            # (n)
+            y_pred = torch.cat(y_pred, dim=0).flatten()
+            y_true = torch.tensor(self.data['label'], device=y_pred.device, dtype=torch.float32)
+
+            return {'accuracy': round(100 * torch.abs(y_pred - y_true).mean().item(), 2)}
+
+
+class Coref(Metric):
+    def __init__(self):
+        super().__init__(metric_name='coref', folder_name='coref')
+
+    def prepare_data(self, folder: IOFolder):
+        return folder.read_file('coref_test.parquet')
+
+    def eval_model(self, model: MLM) -> dict:
+
+        """ Dataset:
+            'sentence': result,
+            'subject_idx': subject_index // 2,
+            'pronoun_idx': pronoun_index // 2,
+            'label': true_label,
+            'use_someone': use_someone,
+            'pronoun_class': pronoun_class,
+            'subject_is_occupation': is_occupation
+        """
+        with torch.no_grad():
+            model.eval()
+            y_pred = []
+            for x in tqdm(DataLoader(self.data, batch_size=32), desc='Coreference-resolution'):
                 enc = model.tokenize_with_spans(fix_string_batch(x['sentence']))
                 # (bs, 1)
                 logits = model.get_coref_predictions(enc, x['subject_idx'])
                 y_pred.append((logits > 0).float().detach())
             # (n)
             y_pred = torch.cat(y_pred, dim=0).flatten()
-            y_true = torch.tensor(self.data['label'], device=DEVICE, dtype=torch.float32)
+            y_true = torch.tensor(self.data['label'], device=y_pred.device, dtype=torch.float32)
 
             return {'accuracy': round(100 * (1.0 - torch.abs(y_pred - y_true).mean().item()), 2)}
 
 
-METRICS = {
-    'default': [SEAT(), LPBS(), WinoGenderSimilarity()],
-    'coreference-resolution': [SEAT(), LPBS(), WinoGenderSimilarity(), WinoGenderFineTune()],
-}
+class MetricsRegister:
+    def __init__(self, constructors: dict[str, list[type]]):
+        self.metric_constructors = constructors
+        self.metrics = {}
+
+    def __getitem__(self, objective) -> list[Metric]:
+        if objective not in self.metrics:
+            self.metrics[objective] = [cls() for cls in self.metric_constructors[objective]]
+        return self.metrics[objective]
 
 
-def run_metrics(task: str, model: MLM) -> dict:
-    return {metric.metric_name: metric.eval_model(model) for metric in METRICS[task]}
+METRIC_REGISTER = MetricsRegister({
+    'kaneko': [SEAT, LPBS, WinoGenderSimilarity],
+    'coreference-resolution': [SEAT, LPBS, Coref, WinoGenderSimilarity, WinoGender]
+})
+"""
+METRIC_REGISTER = MetricsRegister({
+    'kaneko': [SEAT],
+    'coreference-resolution': [SEAT]
+})
+"""
+
+def run_metrics(model: MLM) -> dict:
+    return {metric.metric_name: metric.eval_model(model) for metric in METRIC_REGISTER[model.config.objective]}

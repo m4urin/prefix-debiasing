@@ -1,4 +1,3 @@
-from collections import OrderedDict
 import torch
 from torch import nn
 import numpy as np
@@ -8,8 +7,8 @@ from transformers import AutoTokenizer, AutoModelForMaskedLM, AutoConfig
 from transformers import BatchEncoding, DistilBertForMaskedLM, RobertaForMaskedLM
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPastAndCrossAttentions
 
-from src.utils import get_one_of_attributes, tbatched
-from src.utils.user_dicts import ModelConfig
+from src.utils.config import ModelConfig
+from src.utils.functions import get_one_of_attributes, nested_loop
 from src.utils.pytorch import repeat_stacked, DEVICE, freeze, unfreeze, count_parameters, is_frozen
 
 
@@ -27,67 +26,55 @@ class Tokenizers:
         return self.tokenizers[model_name]
 
 
-TOKENIZER = Tokenizers()
+TOKENIZERS = Tokenizers()
 
 
 class MLM(nn.Module):
-    def __init__(self, config: ModelConfig, task: str, modules: nn.ModuleDict = None):
+    def __init__(self, config: ModelConfig, modules: nn.ModuleDict = None):
         super().__init__()
         self.config = config
         pretrained_config = AutoConfig.from_pretrained(self.config.model_name)
         self.total_layers = get_one_of_attributes(pretrained_config, ['n_layers', 'num_hidden_layers'])
         self.dim = get_one_of_attributes(pretrained_config, ['dim', 'hidden_size'])
-        self.tokenizer = TOKENIZER[self.config.model_name]
-        self.task = task
-        if modules is None:
-            self.module_dict = nn.ModuleDict()
-        else:
-            self.module_dict = modules
+        self.module_dict = nn.ModuleDict() if modules is None else nn.ModuleDict({k: v for k, v in modules.items()})
 
         if 'model' not in self.module_dict:
             self.module_dict['model'] = AutoModelForMaskedLM.from_pretrained(self.config.model_name)
 
-        if self.task == 'coreference-resolution' and 'coreference-resolution' not in self.module_dict:
-            self.module_dict['coreference-resolution'] = nn.Sequential(OrderedDict([
-                        ('f1', nn.Linear(self.dim * 2, 20)),
-                        ('dropout', nn.Dropout(0.2)),
-                        ('swish', nn.SiLU()),
-                        ('f2', nn.Linear(20, 1))]))
+        coref_tag = 'coreference-resolution'
+        if self.config.objective == coref_tag and coref_tag not in self.module_dict:
+            self.module_dict[coref_tag] = nn.Linear(self.dim * 2, 1)
 
         # freeze all parameters
         freeze(self.module_dict)
 
-        # no parameters to save
-        self.parameters_dict = nn.ModuleDict()
+        # no parameters to save, subclasses can set the correct trainable parameters and unfreeze them
+        self._parameters_dict = nn.ModuleDict()
 
     @property
     def n_parameters(self):
-        return count_parameters(self.parameters_dict)
+        return count_parameters(self._parameters_dict)
+
+    @property
+    def tokenizer(self):
+        return TOKENIZERS[self.config.model_name]
+
+    def get_parameters(self):
+        return nn.ModuleDict({k: v for k, v in self._parameters_dict.items()})
 
     """ STATIC METHODS """
     @staticmethod
-    def get_test_model(model_name='distilbert-base-uncased', model_type='finetune', task='default'):
-        if model_type == 'finetune':
-            config = ModelConfig(model_name=model_name, model_type='finetune',
-                                 loss_function='kaneko', epochs=1, batch_size=32, lr=0.00002, num_warmup_steps=2,
-                                 seed=42)
-        elif model_type == 'prefix':
-            config = ModelConfig(model_name=model_name, model_type='prefix',
-                                 prefix_mode='linear', prefix_layers='all', n_prefix_tokens=8,
-                                 loss_function='kaneko', epochs=1, batch_size=32, lr=0.00002, num_warmup_steps=2,
-                                 seed=42)
-        else:
-            config = ModelConfig(model_name=model_name, model_type='base')
-        return MLM.from_config(config, task).to(DEVICE)
+    def get_test_model(model_name='distilbert-base-uncased', model_type='base', objective='kaneko'):
+        return MLM.from_config(ModelConfig(model_name, model_type, objective)).to(DEVICE)
 
     @staticmethod
-    def from_config(config: ModelConfig, task: str, modules: nn.ModuleDict = None):
+    def from_config(config: ModelConfig, modules: nn.ModuleDict = None):
         if config.model_type == 'base':
-            return BaseMLM(config, task, modules)
+            return BaseMLM(config, modules).to(DEVICE)
         elif config.model_type == 'finetune':
-            return FineTuneMLM(config, task, modules)
+            return FineTuneMLM(config, modules).to(DEVICE)
         elif config.model_type == 'prefix':
-            return PrefixMLM(config, task, modules)
+            return PrefixMLM(config, modules).to(DEVICE)
         else:
             raise ValueError(f"Cannot load MLM with config file: {config}")
 
@@ -163,9 +150,6 @@ class MLM(nn.Module):
                 all_spans[s_idx].append([start, end])
                 start = end
 
-
-
-
         all_spans = [[[encoded.word_to_tokens(s_idx, start).start, encoded.word_to_tokens(s_idx, end - 1).end]
                       for start, end in span_parts] for s_idx, span_parts in enumerate(all_spans)]
 
@@ -181,9 +165,10 @@ class MLM(nn.Module):
 
     def get_hidden_states(self, encoded: BatchEncoding) -> torch.Tensor:
         """
-        Embed a list of sentences to be evaluated
-        sentences: a list of individual sentences
-        returns: tensor of size (bs, embedding_dim)
+        Parameters:
+            encoded: A BatchEncoding from model.tokenize(..)
+        Returns:
+            Tensor (bs, seq_length, n_layers, dim)
         """
         # embeddings: (n_layers, bs, seq_length, dim)
         embeddings = torch.stack(self(**encoded.to(DEVICE), output_hidden_states=True)['hidden_states'])
@@ -253,8 +238,8 @@ class MLM(nn.Module):
         # (bs, seq_length, vocabulary or n_word_ids)
         return self(**encoding.to(DEVICE))['logits'].softmax(dim=-1)[..., word_ids]
 
-    def get_mask_probabilities(self, encoding: BatchEncoding, word_ids: list[int] = None,
-                               output_tensor=False) -> Union[list[torch.Tensor], torch.Tensor]:
+    def get_mask_probabilities(self, encoding: BatchEncoding, word_ids: list[int] = None, output_tensor=False) \
+            -> Union[list[torch.Tensor], torch.Tensor]:
         probabilities = self.get_word_probabilities(encoding, word_ids)  # (bs, seq_length, vocabulary or n_word_ids)
         result = [[] for _ in range(probabilities.size()[0])]
         for bs_idx, seq_idx in zip(encoding['mask_idx_sent'], encoding['mask_idx_word']):
@@ -292,7 +277,7 @@ class MLM(nn.Module):
     def __str__(self) -> str:
         config_info = str(self.config).replace('\n', '\n\t')
         modules_info = ', '.join([f"'{k}' ({is_frozen(v)})" for k, v in self.module_dict.items()])
-        parameters_info = ', '.join([f"'{k}' ({is_frozen(v)})" for k, v in self.parameters_dict.items()])
+        parameters_info = ', '.join([f"'{k}' ({is_frozen(v)})" for k, v in self._parameters_dict.items()])
         return f"MLM (\n" \
                f"\t{config_info}\n" \
                f"\ttask={self.task}\n" \
@@ -305,23 +290,23 @@ class MLM(nn.Module):
 
 
 class BaseMLM(MLM):
-    def __init__(self, config: ModelConfig, task: str, modules: nn.ModuleDict = None):
-        super().__init__(config, task, modules)
-        if self.task == 'coreference-resolution':
+    def __init__(self, config: ModelConfig, modules: nn.ModuleDict = None):
+        super().__init__(config, modules)
+        if self.config.objective == 'coreference-resolution':
             unfreeze(self.module_dict)
-            self.parameters_dict = self.module_dict
+            self._parameters_dict = self.module_dict
 
 
 class FineTuneMLM(MLM):
-    def __init__(self, config: ModelConfig, task: str, modules: nn.ModuleDict = None):
-        super().__init__(config, task, modules)
+    def __init__(self, config: ModelConfig, modules: nn.ModuleDict = None):
+        super().__init__(config, modules)
         unfreeze(self.module_dict)
-        self.parameters_dict = self.module_dict
+        self._parameters_dict = self.module_dict
 
 
 class PrefixMLM(MLM):
-    def __init__(self, config: ModelConfig, task: str, modules: nn.ModuleDict = None):
-        super().__init__(config, task, modules)
+    def __init__(self, config: ModelConfig, modules: nn.ModuleDict = None):
+        super().__init__(config, modules)
 
         if 'prefix_embeddings' not in self.module_dict:
             self.module_dict['prefix_embeddings'] = PrefixEmbeddings(total_layers=self.total_layers, dim=self.dim,
@@ -330,10 +315,11 @@ class PrefixMLM(MLM):
         # initialize prefix module to interact with the model
         PrefixModule.add_to(self.config.model_name, self.module_dict['model'], self.module_dict['prefix_embeddings'])
 
-        self.parameters_dict = nn.ModuleDict({k: v for k, v in self.module_dict.items() if k != 'model'})
+        # all parameters except 'model' should be saved
+        self._parameters_dict = nn.ModuleDict({k: v for k, v in self.module_dict.items() if k != 'model'})
 
         freeze(self.module_dict)
-        unfreeze(self.parameters_dict)
+        unfreeze(self._parameters_dict)
 
 
 class PrefixEmbeddings(nn.Module):
@@ -687,8 +673,8 @@ class EvalMLM(nn.Module):
         """
         with torch.no_grad():
             sentence_embeddings = []
-            for sent_batch in tbatched(sentences, batch_size=batch_size, desc=f'Embed sentences (bs={batch_size}, '
-                                                                              f'model={self.model.config.model_name})'):
+            info = f'Embed sentences (bs={batch_size}, model={self.model.config.model_name})'
+            for sent_batch in nested_loop(sentences, batch_size=batch_size, progress_bar=info):
                 encoded = self.model.tokenize(sent_batch)
                 embeddings = self.model.get_sentence_embeddings(encoded, layer=-1)  # (bs, dim)
                 sentence_embeddings.append(embeddings.cpu())
@@ -723,8 +709,8 @@ class EvalMLM(nn.Module):
                     raise Exception(f"'{w}' cannot be encoded to a single token")
             sentences = [s.replace('[MASK]', self.model.tokenizer.mask_token_id) for s in sentences]
             probabilities = []
-            for sent_batch in tbatched(sentences, batch_size=batch_size, desc=f'Mask probabilities (bs={batch_size}, '
-                                                                              f'model={self.model.config.model_name})'):
+            info = f'Mask probabilities (bs={batch_size}, model={self.model.config.model_name})'
+            for sent_batch in nested_loop(sentences, batch_size=batch_size, progress_bar=info):
                 encoded = self.model.tokenize(sent_batch)
                 # (bs, n_masks, n_word_ids)
                 p = self.model.get_mask_probabilities(encoded, word_ids, output_tensor=True)

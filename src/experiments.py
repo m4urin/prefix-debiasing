@@ -1,134 +1,93 @@
-from src.MLM import MLM, ModelConfig
+from typing import Union
+
+from src.MLM import MLM
 from src.evaluation_metrics import run_metrics
-from src.trainers import Trainer
-from src.utils import dataframe_from_dicts, flatten_dict, print_title, stack_dicts
-from src.utils.io import DATA_DIR
-from src.utils.pytorch import DEVICE
-from src.utils.user_dicts import EXCLUDE_TRAINING, ExperimentResult
-from copy import deepcopy
+from src.trainers import train_model
+from src.utils.config import ModelConfig, ModelResult
+from src.utils.files import get_folder
+from src.utils.functions import dataframe_from_dicts
+from src.utils.printing import print_title
 
 
-def configs_from_hyper_parameters(hp: dict) -> list[ModelConfig]:
-    all_configs = []
-    for model_name in hp['model_name']:
-        for model_type in hp['model_type']:
-            base_config = {'model_name': model_name, 'model_type': model_type}
-            if model_type == 'base':
-                all_configs.append(base_config)
-            else:
-                train_config_1 = {k: hp[k] for k in ['batch_size', 'epochs', 'num_warmup_steps', 'seed']}
-                for loss_function in hp['loss_function']:
-                    train_config_2 = {'loss_function': loss_function, 'lr': hp['lr'][model_type]}
-                    if model_type == 'finetune':
-                        all_configs.append({**base_config, **train_config_1, **train_config_2})
-                    elif model_type == 'prefix':
-                        for prefix_mode in hp['prefix_mode']:
-                            for prefix_layers in hp['prefix_layers']:
-                                for n_prefix_tokens in hp['n_prefix_tokens']:
-                                    prefix_config = {'prefix_mode': prefix_mode, 'prefix_layers': prefix_layers,
-                                                     'n_prefix_tokens': n_prefix_tokens}
-                                    all_configs.append({**base_config, **train_config_1,
-                                                        **train_config_2, **prefix_config})
-                    else:
-                        raise ValueError(f"Modeltype '{model_type}' not supported.")
-    return [ModelConfig(**c) for c in all_configs]
-
-
-class ExperimentTracker:
-    def __init__(self, name: str):
+class Experiment:
+    def __init__(self, name: str,
+                 force_training=False,
+                 force_evaluation=False,
+                 exclude_train: set[ModelConfig] = None,
+                 exclude_eval: set[ModelConfig] = None):
         self.name = name
-        self.cache = DATA_DIR.get_folder('.cache', create_if_not_exist=True)
-        self.work_dir = DATA_DIR \
-            .get_folder('experiments', create_if_not_exist=True) \
-            .get_folder(self.name, create_if_not_exist=True)
-        config_file = self.work_dir.read_file('config.json')
-        self.configs = configs_from_hyper_parameters(config_file)
+        self.cache = get_folder('.cache', create_if_not_exists=True)
+        self.work_dir = get_folder(f'experiments/{self.name}', create_if_not_exists=True)
+        hyper_parameters = self.work_dir.read_file('config.json')
+        self.configs = ModelConfig.from_hyper_params(hyper_parameters)
 
-        if 'tasks' not in config_file:
-            self.tasks = []
-        elif isinstance(config_file['tasks'], str):
-            self.tasks = [config_file['tasks']]
+        self.force_training = force_training
+        self.force_evaluation = force_evaluation
+        self.exclude_train = set() if exclude_train is None else exclude_train
+        self.exclude_eval = set() if exclude_eval is None else exclude_eval
+
+    def read(self, config: ModelConfig) -> ModelResult:
+        file_name = config.get_filename()
+        if self.cache.file_exists(file_name):
+            result = self.cache.read_file(file_name)
         else:
-            self.tasks = config_file['tasks']
-        self.tasks = ['default'] + list(set([k for k in self.tasks if k != 'default']))
+            result = {'model_config': config}
+        return ModelResult.from_dict(result)
 
-    def run_experiment(self, redo_training=None, redo_eval=None):
-        # for tasks
-        redo_training = set(redo_training) if redo_training is not None else set()
-        redo_eval = set(redo_eval) if redo_eval is not None else set()
+    def write(self, result: ModelResult):
+        self.cache.write_file(result.model_config.get_filename(), result.to_dict())
 
+    def train(self, config: ModelConfig):
+        result = self.read(config)
+        if config not in self.exclude_train and (self.force_training or not result.training_completed):
+            print('Train', config)
+            parameters = None
+            if config.objective != 'kaneko':
+                print('Load debiased parameters..')
+                parameters = self.read(config.without_extensions()).parameters
+                if parameters is None:
+                    raise ValueError(f'Cannot train {config}, because the base model '
+                                     f'({config.without_extensions()}) does not exist.')
+            model = MLM.from_config(config, parameters)
+            result = train_model(model)
+            self.write(result)
+            self.exclude_train.add(config)
+
+    def eval(self, config: ModelConfig):
+        result = self.read(config)
+        if config not in self.exclude_eval and (self.force_evaluation or len(result.evaluations) == 0):
+            print('Evaluate', config)
+            if result.parameters is None:
+                raise ValueError(f'Cannot evaluate {config}, because it was never trained.')
+            result.evaluations = run_metrics(MLM.from_config(config, result.parameters))
+            self.write(result)
+            self.exclude_eval.add(config)
+
+    def run(self):
         print_title(self.name)
-        all_evaluations = {task_name: [] for task_name in self.tasks}
+        all_evaluations = []
         for config in self.configs:
-            file_name = config.get_hash() + '.pt'
-            if self.cache.file_exists(file_name):
-                data = self.cache.read_file(file_name)
-            else:
-                data = {'config': config.to_dict()}
-            result = ExperimentResult.from_dict(data)
-
-            for task_name in self.tasks:
-                task_result = result.task[task_name]
-                print(f"\n{task_name}: {config}")
-                force_training = task_name in redo_training
-                force_evaluation = task_name in redo_eval
-                do_training = force_training or not task_result.train_info.training_completed
-                do_evaluation = do_training or force_evaluation or len(task_result.evaluations) == 0
-
-                model = None
-
-                if do_training:
-                    # must be trained
-                    if force_training:
-                        print(f'   Force re-training of model..')
-                    else:
-                        print(f'   No parameters found, train model..')
-                    parameters = None
-                    if task_name != 'default':
-                        parameters = deepcopy(result.task['default'].parameters)
-                        if parameters is None:
-                            raise ValueError('Default parameters not present..')
-                        else:
-                            print('Using parameters from default.')
-                    model = MLM.from_config(config, task_name, parameters).to(DEVICE)
-                    if config.model_type not in EXCLUDE_TRAINING[task_name]:
-                        task_result.train_info = Trainer.run(task_name, model)
-                    else:
-                        print('This model is not trainable.. Skip training.')
-                        task_result.train_info.training_completed = True
-                    task_result.parameters = model.parameters_dict
-                    self.cache.write_file(file_name, result.to_dict())
-                else:
-                    print(f'   Parameters found, skip training..')
-
-                if do_evaluation:
-                    if force_evaluation:
-                        print(f'   Force re-evaluation of model..')
-                    else:
-                        print(f'   No evaluations found, evaluate model..')
-                    if not do_training:
-                        model = MLM.from_config(config, task_name, task_result.parameters).to(DEVICE)
-                        print('model before evaluation and loaded from file:\n', model, '\n\n')
-                    task_result.evaluations = run_metrics(task_name, model)
-                    self.cache.write_file(file_name, result.to_dict())
-                else:
-                    print(f'   Evaluations found, skip evaluation..')
-
-                train_time = round(task_result.train_info.total_training_time / 60, 1)
-                n_parameters = model.n_parameters if model is not None else 0
-                all_evaluations[task_name].append({'task': task_name,
-                                                   **result.config.to_dict(),
-                                                   **flatten_dict(task_result.evaluations),
-                                                   'training_time (minutes)': train_time,
-                                                   'n_parameters': n_parameters})
-
-        #print(all_evaluations)
-        df = sum(all_evaluations.values(), [])
-        df = dataframe_from_dicts(df).fillna('')
+            self.train(config)
+            self.eval(config)
+            result = self.read(config)
+            all_evaluations.append({**config.to_dict(),
+                                    'training_time (minutes)': round(result.total_training_time / 60, 1),
+                                    'n_parameters': result.n_parameters,
+                                    **result.evaluations})
+        df = dataframe_from_dicts(all_evaluations).fillna('')
         self.work_dir.write_file(f'result.csv', df)
-        print(df.to_string())
+        print(df.to_string(), '\n')
+        return self
 
-        #for task_name in self.tasks:
-        #    df = dataframe_from_dicts(all_evaluations[task_name]).fillna('')
-        #    self.work_dir.write_file(f'{task_name}.csv', df)
-        #    print(df.to_string())
+
+def run_experiments(names: Union[str, list[str]],
+                    *more_names: str,
+                    force_training=False,
+                    force_evaluation=False,
+                    exclude_train: set[ModelConfig] = None,
+                    exclude_eval: set[ModelConfig] = None):
+    all_names = (names, *more_names) if isinstance(names, str) else (*names, *more_names)
+    for name in all_names:
+        experiment = Experiment(name, force_training, force_evaluation, exclude_train, exclude_eval).run()
+        exclude_train = experiment.exclude_train
+        exclude_eval = experiment.exclude_eval

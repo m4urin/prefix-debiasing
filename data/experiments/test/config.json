@@ -1,14 +1,8 @@
 {
-  "model_name": ["distilbert-base-uncased"],
-  "model_type": ["base"],
+  "model_name": ["roberta-base"],
+  "model_type": ["base", "prefix"],
   "prefix_mode": ["linear"],
   "prefix_layers": ["all"],
-  "n_prefix_tokens": [9],
-  "batch_size": 32,
-  "lr": {"finetune": 0.00003, "prefix": 0.0005},
-  "epochs": 3,
-  "loss_function": ["kaneko"],
-  "num_warmup_steps": 100,
-  "seed":42,
-  "tasks": ["coreference-resolution"]
+  "n_prefix_tokens": [8],
+  "objective": ["kaneko", "coreference-resolution"]
 }
