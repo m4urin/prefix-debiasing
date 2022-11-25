@@ -6,7 +6,7 @@ from torch import cosine_similarity
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from dependencies.weat import run_test
+from src.dependencies.weat import run_test
 from src.MLM import MLM
 from src.utils.files import get_folder, IOFolder
 from src.utils.functions import nested_loop
