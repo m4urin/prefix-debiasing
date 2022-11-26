@@ -325,10 +325,11 @@ METRIC_REGISTER = MetricsRegister({
 })
 """
 METRIC_REGISTER = MetricsRegister({
-    'kaneko': [SEAT],
-    'coreference-resolution': [SEAT]
+    'kaneko': [],
+    'coreference-resolution': []
 })
 """
+
 
 def run_metrics(model: MLM) -> dict:
     return {metric.metric_name: metric.eval_model(model) for metric in METRIC_REGISTER[model.config.objective]}

@@ -6,9 +6,9 @@ from torch.utils.data import DataLoader
 from tqdm import trange, tqdm
 from unidecode import unidecode
 
-from src.MLM import MLM, BaseMLM
+from src.MLM import MLM
 from src.utils.files import DATA_DIR
-from src.utils.pytorch import fix_string_batch, DEVICE
+from src.utils.pytorch import fix_string_batch
 from src.utils.config import ModelConfig
 
 
@@ -28,7 +28,6 @@ def preprocess_raw_data():
     male_words = set([line for line in DATA_DIR['train/kaneko/male.txt'].read() if len(line) > 0])
     female_words = set([line for line in DATA_DIR['train/kaneko/female.txt'].read() if len(line) > 0])
     stereotypes = set([line for line in DATA_DIR['train/kaneko/stereotype.txt'].read() if len(line) > 0])
-    word_sets = [male_words, female_words, stereotypes]
     all_words = list(male_words) + list(female_words) + list(stereotypes)
 
     word_finder = nltk.RegexpTokenizer(word_list_regex(all_words), gaps=True).tokenize_sents
@@ -66,7 +65,6 @@ def preprocess_raw_data():
 def calc_v_a(model: MLM, batch_size=32):
     with torch.no_grad():
         v_a = {}
-        all_embeddings = []
         # CALCULATE V_a
         for x in tqdm(DataLoader(DATA_DIR['train/kaneko'].read_file('attributes.parquet'),
                                  batch_size=batch_size),
@@ -92,8 +90,7 @@ def calc_v_a(model: MLM, batch_size=32):
 
 def preprocess_v_a():
     for model_name in ["distilbert-base-uncased", "roberta-base"]:
-        model = BaseMLM(ModelConfig(model_name, 'base'), 'default').to(DEVICE)
-        calc_v_a(model)
+        calc_v_a(MLM.from_config(ModelConfig(model_name, 'base', 'kaneko')))
 
 
 if __name__ == '__main__':

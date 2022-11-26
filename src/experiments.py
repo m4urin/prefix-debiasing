@@ -42,7 +42,7 @@ class Experiment:
         if config not in self.exclude_train and (self.force_training or not result.training_completed):
             print('Train', config)
             parameters = None
-            if config.objective != 'kaneko':
+            if not config.is_default():
                 print('Load debiased parameters..')
                 parameters = self.read(config.without_extensions()).parameters
                 if parameters is None:

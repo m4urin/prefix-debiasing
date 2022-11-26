@@ -31,10 +31,10 @@ class OrthogonalTrainer(Trainer):
         result = ModelResult(config)
         start_time = time()
         last_progress_bar_update = start_time - 10
-        min_train_loss = float('inf')
+        train_loss = LatestStats(50)
         total_steps = config.epochs * ceil(len(self.dataset_attribute) / (config.batch_size // 2))
 
-        optimizer = AdamW(params=model.get_parameters().parameters(), lr=config.lr)
+        optimizer = AdamW(params=model.get_parameters_to_train(), lr=config.lr)
         scheduler = get_linear_schedule_with_warmup(optimizer=optimizer,
                                                     num_warmup_steps=config.num_warmup_steps,
                                                     num_training_steps=int(total_steps * 1.04))
@@ -55,10 +55,10 @@ class OrthogonalTrainer(Trainer):
                 # RUN MODELS
                 enc_attr = model.tokenize([''.join(s) for s in fix_string_batch(batch['sentences'])])
                 with torch.no_grad():
-                    # (bs, dim)
+                    # (bs, seq, dim)
                     attr_old_hidden = base_model.get_hidden_states(enc_attr)
                     attr_lengths = enc_attr['attention_mask'].sum(dim=-1).tolist()
-                # (bs, dim)
+                # (bs, seq, dim)
                 attr_new_hidden = model.get_hidden_states(enc_attr)
 
                 # (bs, sent_parts)
@@ -74,7 +74,7 @@ class OrthogonalTrainer(Trainer):
 
                 prefix_regularization = 0
                 if model.config.is_prefix():
-                    prefix_regularization = 0.01 * model.get_parameters()['prefix_embeddings'].regularization()
+                    prefix_regularization = 0.01 * model.module_dict['prefix_embeddings'].regularization()
                     result.add_scalar(f'loss/prefix_regularization', prefix_regularization.item())
 
                 # (bs/2, n_layers, dim)
@@ -82,7 +82,7 @@ class OrthogonalTrainer(Trainer):
                 result.add_scalar(f'loss/orthogonal', orthogonal_loss.item())
 
                 loss = embedding_regularization_loss + orthogonal_loss + prefix_regularization
-                min_train_loss = min(min_train_loss, loss.item())
+                train_loss.add(loss.item(), len(attr_old_hidden))
                 result.add_scalar(f'loss/total', loss.item())
 
                 loss.backward()
@@ -93,12 +93,12 @@ class OrthogonalTrainer(Trainer):
                     progress_bar.set_description(
                         desc=f"Orthogonal training: "
                              f"epoch {epoch + 1}/{config.epochs}, "
-                             f"loss={pretty_number(min_train_loss, 2)}")
+                             f"loss={pretty_number(train_loss.get_score(), 2)}")
                     last_progress_bar_update = time()
 
                 progress_bar.update()
 
-        return result.finish_training(start_time, model.get_parameters())
+        return result.finish_training(start_time, model.get_parameters_to_save())
 
 
 class CorefTrainer(Trainer):
@@ -116,12 +116,12 @@ class CorefTrainer(Trainer):
         current_train_step = 0
         total_train_steps = config.epochs * ceil(len(self.dataset_train) / config.batch_size)
         total_test_steps = config.epochs * ceil(len(self.dataset_test) / config.batch_size)
-        switch_optim = total_train_steps // 6
+        switch_optim = total_train_steps // 5
 
-        freeze(model.module_dict)
-        unfreeze(model.get_parameters()['coreference-resolution'])
+        freeze(model)
+        unfreeze(model.module_dict['coreference-resolution'])
 
-        optimizer = AdamW(params=model.get_parameters()['coreference-resolution'].parameters(), lr=10 * config.lr)
+        optimizer = AdamW(params=model.module_dict['coreference-resolution'].parameters(), lr=config.lr * 5)
         scheduler = get_linear_schedule_with_warmup(optimizer=optimizer,
                                                     num_warmup_steps=config.num_warmup_steps,
                                                     num_training_steps=int(switch_optim * 1.04))
@@ -130,24 +130,23 @@ class CorefTrainer(Trainer):
         title = 'Train co-ref head only..'
         progress_bar = tqdm(total=total_train_steps + total_test_steps)
 
-        min_loss_train, min_loss_test = float('inf'), float('inf')
+        loss_train, loss_test = LatestStats(), LatestStats()
+        accuracy_train, accuracy_test = LatestStats(), LatestStats()
 
         for epoch in range(config.epochs):
             model.train()
-            total_correct = 0
             for iteration, x in enumerate(DataLoader(self.dataset_train.shuffle(seed=config.seed + epoch),
                                                      batch_size=config.batch_size)):
                 if current_train_step == switch_optim:
                     title = 'Train complete model..'
-                    freeze(model.module_dict)
-                    unfreeze(model.get_parameters())
-                    optimizer = AdamW(params=model.get_parameters().parameters(), lr=config.lr)
+                    optimizer = AdamW(params=model.get_parameters_to_train(), lr=config.lr)
                     scheduler = get_linear_schedule_with_warmup(optimizer=optimizer,
                                                                 num_warmup_steps=config.num_warmup_steps,
                                                                 num_training_steps=int((total_train_steps -
                                                                                         switch_optim) * 1.04))
                 optimizer.zero_grad()
                 sentences, subject_idx, labels = fix_string_batch(x['sentence']), x['subject_idx'], x['label']
+
                 labels = labels.unsqueeze(-1).to(device=DEVICE, dtype=torch.float32).detach()
                 enc = model.tokenize_with_spans(sentences)
                 y_pred = model.get_coref_predictions(enc, subject_idx)
@@ -155,49 +154,82 @@ class CorefTrainer(Trainer):
                 loss.backward()
                 optimizer.step()
                 scheduler.step()
+                loss = loss.item()
 
-                total_correct += torch.abs((y_pred <= 0).float() - labels).sum().item()
-                min_loss_train = min(min_loss_train, loss.item())
-                result.add_scalar(f'loss/train', loss.item())
+                #if current_train_step % 40 == 0:
+                #    print(sentences)
+                #    print(torch.cat((y_pred, labels), dim=-1)[:6])
+
+                accuracy_train.add(torch.abs((y_pred <= 0).float() - labels).sum().item(), len(sentences))
+                loss_train.add(loss, len(sentences))
+                result.add_scalar(f'loss/train', loss)
 
                 if time() - last_progress_bar_update > 1:
                     progress_bar.set_description(
                         desc=f"{title} "
                              f"epoch {epoch + 1}/{config.epochs}, "
-                             f"train_loss={pretty_number(min_loss_train, 2)}, "
-                             f"test_loss={pretty_number(min_loss_test, 2)}")
+                             f"train_loss={pretty_number(loss_train.get_score(), 2)}, "
+                             f"train_acc={round(100 * accuracy_train.get_score(), 2)}, "
+                             f"test_loss={pretty_number(loss_test.get_score(), 2)}, "
+                             f"test_acc={round(100 * accuracy_test.get_score(), 2)}")
                     last_progress_bar_update = time()
 
                 progress_bar.update()
                 current_train_step += 1
 
-            result.add_scalar(f'acc/train', round(total_correct / len(self.dataset_train), 4))
-
             with torch.no_grad():
                 last_progress_bar_update = time() - 10
-                total_correct = 0
                 model.eval()
                 for iteration, x in enumerate(DataLoader(self.dataset_test, batch_size=config.batch_size)):
                     sentences, subject_idx, labels = fix_string_batch(x['sentence']), x['subject_idx'], x['label']
                     labels = labels.unsqueeze(-1).to(device=DEVICE, dtype=torch.float32).detach()
                     enc = model.tokenize_with_spans(sentences)
                     y_pred = model.get_coref_predictions(enc, subject_idx)
-                    loss = criterion(y_pred, labels)
-                    total_correct += torch.abs((y_pred <= 0).float() - labels).sum().item()
-                    min_loss_test = min(min_loss_test, loss.item())
-                    result.add_scalar(f'loss/test', loss.item())
+                    loss = criterion(y_pred, labels).item()
+
+                    accuracy_test.add(torch.abs((y_pred <= 0).float() - labels).sum().item(), len(sentences))
+                    loss_test.add(loss, len(sentences))
+                    result.add_scalar(f'loss/test', loss)
 
                     if time() - last_progress_bar_update > 1:
                         progress_bar.set_description(
                             desc=f"{title} "
                                  f"epoch {epoch + 1}/{config.epochs}, "
-                                 f"train_loss={pretty_number(min_loss_train, 2)}, "
-                                 f"test_loss={pretty_number(min_loss_test, 2)}")
+                                 f"train_loss={pretty_number(loss_train.get_score(), 2)}, "
+                                 f"train_acc={round(100 * accuracy_train.get_score(), 2)}, "
+                                 f"test_loss={pretty_number(loss_test.get_score(), 2)}, "
+                                 f"test_acc={round(100 * accuracy_test.get_score(), 2)}")
                         last_progress_bar_update = time()
-                    progress_bar.update()
-            result.add_scalar(f'acc/test', round(total_correct / len(self.dataset_test), 4))
 
-        return result.finish_training(start_time, model.get_parameters())
+        return result.finish_training(start_time, model.get_parameters_to_save())
+
+
+class LatestStats:
+    def __init__(self, last_n=30):
+        self.counter = 0
+        self.last_n = last_n
+        self.batch_sizes = torch.ones(last_n, dtype=torch.float32) * 1e-20
+        self.stats = torch.ones(last_n, dtype=torch.float32)
+        self.calculated = False
+        self.result = None
+
+    def add(self, stat, batch_size):
+        self.stats[self.counter] = stat
+        self.batch_sizes[self.counter] = batch_size
+        self.counter += 1
+        if self.counter >= self.last_n:
+            self.counter = 0
+        self.calculated = False
+
+    def get_score(self) -> float:
+        if not self.calculated:
+            total_batch = self.batch_sizes.sum()
+            if torch.abs(total_batch) < 1e-3:
+                self.result = 0
+            else:
+                self.result = (self.stats.sum() / total_batch).item()
+            self.calculated = True
+        return self.result
 
 
 class TrainRegister:
@@ -223,4 +255,4 @@ def train_model(model: MLM):
         result.evaluations = {}  # remove any evaluations, since they are not valid anymore
         return result
     else:
-        return ModelResult(model.config).finish_training(time(), model.get_parameters())
+        return ModelResult(model.config).finish_training(time(), model.get_parameters_to_save())

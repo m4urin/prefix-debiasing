@@ -5,8 +5,8 @@ from datasets import load_dataset, concatenate_datasets, Dataset
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
-from src.utils import stack_dicts
 from src.utils.files import DATA_DIR
+from src.utils.functions import stack_dicts
 
 eval_folder = DATA_DIR['eval/winogender']
 train_folder = DATA_DIR['train/coref']
@@ -35,7 +35,8 @@ for x in tqdm(dataset, desc='gap'):
             reverse = True
         index1_end = index1 + len(text1)
         index2_end = index2 + len(text2)
-        lengths = [(0, index1), (index1, index1_end), (index1_end, index2), (index2, index2_end), (index2_end, len(x['Text']))]
+        lengths = [(0, index1), (index1, index1_end), (index1_end, index2),
+                   (index2, index2_end), (index2_end, len(x['Text']))]
 
         final = []
         for i, (j, k) in enumerate(lengths):
@@ -67,7 +68,8 @@ for x in tqdm(dataset, desc='super_glue'):
         reverse = True
     index1_end = index1 + len(text1.split())
     index2_end = index2 + len(text2.split())
-    lengths = [(0, index1), (index1, index1_end), (index1_end, index2), (index2, index2_end), (index2_end, len(txt_parts))]
+    lengths = [(0, index1), (index1, index1_end), (index1_end, index2),
+               (index2, index2_end), (index2_end, len(txt_parts))]
 
     for i, (j, k) in enumerate(lengths):
         sub = ' '.join(txt_parts[j:k])
@@ -91,7 +93,7 @@ regex_tokenizer = nltk.RegexpTokenizer(regex_tokenizer, gaps=True)  # .tokenize_
 templates_df = eval_folder.read_file('templates.tsv')
 
 for i, (occupation, participant, label, sentence) in tqdm(templates_df.iterrows(),
-                                                           desc='winogender', total=len(templates_df)):
+                                                          desc='winogender', total=len(templates_df)):
     data = [(0, participant, "$PARTICIPANT", label), (1, occupation, "$OCCUPATION", 1-label)]
     for j in range(2):
         is_occupation, subject, subject_tag, true_label = data[j]

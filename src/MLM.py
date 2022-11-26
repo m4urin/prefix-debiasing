@@ -1,7 +1,9 @@
+from collections import OrderedDict
+
 import torch
 from torch import nn
 import numpy as np
-from typing import Optional, Union, Tuple
+from typing import Optional, Union, Tuple, List
 
 from transformers import AutoTokenizer, AutoModelForMaskedLM, AutoConfig
 from transformers import BatchEncoding, DistilBertForMaskedLM, RobertaForMaskedLM
@@ -9,7 +11,7 @@ from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPa
 
 from src.utils.config import ModelConfig
 from src.utils.functions import get_one_of_attributes, nested_loop
-from src.utils.pytorch import repeat_stacked, DEVICE, freeze, unfreeze, count_parameters, is_frozen
+from src.utils.pytorch import repeat_stacked, DEVICE, freeze, unfreeze, count_parameters, is_frozen, list_parameters
 
 
 class Tokenizers:
@@ -43,29 +45,36 @@ class MLM(nn.Module):
 
         coref_tag = 'coreference-resolution'
         if self.config.objective == coref_tag and coref_tag not in self.module_dict:
-            self.module_dict[coref_tag] = nn.Linear(self.dim * 2, 1)
+            self.module_dict[coref_tag] = nn.Sequential(OrderedDict({
+                'f1': nn.Linear(self.dim * 2, 64),
+                'swish': nn.SiLU(),
+                'f2': nn.Linear(64, 1)
+            }))
 
-        # freeze all parameters
-        freeze(self.module_dict)
+    def get_parameters_to_train(self) -> List[nn.Parameter]:
+        raise NotImplementedError('Not implemented yet.')
 
-        # no parameters to save, subclasses can set the correct trainable parameters and unfreeze them
-        self._parameters_dict = nn.ModuleDict()
+    def get_parameters_to_save(self) -> nn.ModuleDict:
+        raise NotImplementedError('Not implemented yet.')
 
     @property
     def n_parameters(self):
-        return count_parameters(self._parameters_dict)
+        return count_parameters(list(self.get_parameters_to_train()))
 
     @property
     def tokenizer(self):
         return TOKENIZERS[self.config.model_name]
 
-    def get_parameters(self):
-        return nn.ModuleDict({k: v for k, v in self._parameters_dict.items()})
-
     """ STATIC METHODS """
     @staticmethod
     def get_test_model(model_name='distilbert-base-uncased', model_type='base', objective='kaneko'):
-        return MLM.from_config(ModelConfig(model_name, model_type, objective)).to(DEVICE)
+        if model_type == 'base':
+            config = ModelConfig(model_name, model_type, objective)
+        elif model_type == 'finetune':
+            config = ModelConfig(model_name, model_type, objective)
+        else:
+            config = ModelConfig(model_name, model_type, objective, 'linear', 'all', 8)
+        return MLM.from_config(config).to(DEVICE)
 
     @staticmethod
     def from_config(config: ModelConfig, modules: nn.ModuleDict = None):
@@ -141,7 +150,7 @@ class MLM(nn.Module):
             for i in range(0, len(batch[s_idx]) - 1, 2):
                 text = ''
                 while text != sentences_lower[s_idx][i]:
-                    text += all_word_parts[s_idx][start] #.strip()
+                    text += all_word_parts[s_idx][start]
                     start += 1
                 text, end = '', start
                 while text != sentences_lower[s_idx][i + 1]:
@@ -292,16 +301,35 @@ class MLM(nn.Module):
 class BaseMLM(MLM):
     def __init__(self, config: ModelConfig, modules: nn.ModuleDict = None):
         super().__init__(config, modules)
-        if self.config.objective == 'coreference-resolution':
-            unfreeze(self.module_dict)
-            self._parameters_dict = self.module_dict
+        if self.config.is_default():
+            self._parameters_to_save = nn.ModuleDict()
+        else:
+            self._parameters_to_train = list_parameters(self.module_dict)
+            self._parameters_to_save = nn.ModuleDict({k: v for k, v in self.module_dict.items()})
+
+    def get_parameters_to_train(self) -> List[nn.Parameter]:
+        if self.config.is_default():
+            raise Exception('Cannot train a base model with kaneko.')
+        else:
+            freeze(self)
+            return unfreeze(self._parameters_to_train)
+
+    def get_parameters_to_save(self) -> nn.ModuleDict:
+        return freeze(self._parameters_to_save)
 
 
 class FineTuneMLM(MLM):
     def __init__(self, config: ModelConfig, modules: nn.ModuleDict = None):
         super().__init__(config, modules)
-        unfreeze(self.module_dict)
-        self._parameters_dict = self.module_dict
+        self._parameters_to_train = list_parameters(self.module_dict)
+        self._parameters_to_save = nn.ModuleDict({k: v for k, v in self.module_dict.items()})
+
+    def get_parameters_to_train(self) -> List[nn.Parameter]:
+        freeze(self)
+        return unfreeze(self._parameters_to_train)
+
+    def get_parameters_to_save(self) -> nn.ModuleDict:
+        return freeze(self._parameters_to_save)
 
 
 class PrefixMLM(MLM):
@@ -309,17 +337,53 @@ class PrefixMLM(MLM):
         super().__init__(config, modules)
 
         if 'prefix_embeddings' not in self.module_dict:
+            # initialize new prefix embeddings
             self.module_dict['prefix_embeddings'] = PrefixEmbeddings(total_layers=self.total_layers, dim=self.dim,
                                                                      **self.config.to_dict())
+        self.embeddings_bound = False
 
-        # initialize prefix module to interact with the model
-        PrefixModule.add_to(self.config.model_name, self.module_dict['model'], self.module_dict['prefix_embeddings'])
+        if self.config.is_default() or self.config.prefix_finetune == 'prefix':
+            self._parameters_to_train = list_parameters(self.module_dict['prefix_embeddings'])
+        elif self.config.prefix_finetune == 'model':
+            self._parameters_to_train = list_parameters(self.module_dict['model'])
+        else:
+            self._parameters_to_train = list_parameters(self.module_dict)
 
-        # all parameters except 'model' should be saved
-        self._parameters_dict = nn.ModuleDict({k: v for k, v in self.module_dict.items() if k != 'model'})
+    def get_parameters_to_train(self) -> List[nn.Parameter]:
+        freeze(self)
+        return unfreeze(self._parameters_to_train)
 
-        freeze(self.module_dict)
-        unfreeze(self._parameters_dict)
+    def get_parameters_to_save(self) -> nn.ModuleDict:
+        if self.config.is_default() or self.config.prefix_finetune == 'prefix':
+            result = nn.ModuleDict({k: v for k, v in self.module_dict.items() if k != 'model'})
+        else:
+            if self.embeddings_bound:
+                # initialize prefix module to interact with the model
+                PrefixModule.remove_from(self.config.model_name, self.module_dict['model'])
+                self.embeddings_bound = False
+            if self.config.prefix_finetune == 'model':
+                result = nn.ModuleDict({k: v for k, v in self.module_dict.items() if k != 'prefix_embeddings'})
+            else:
+                result = nn.ModuleDict({k: v for k, v in self.module_dict.items()})
+        #print('>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>')
+        #print(self.config)
+        #print(result)
+        #print('>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>')
+        return freeze(result)
+
+    def forward(self, input_ids: Optional[torch.LongTensor] = None, attention_mask: Optional[torch.FloatTensor] = None,
+                inputs_embeds: Optional[torch.FloatTensor] = None, labels: Optional[torch.LongTensor] = None,
+                output_attentions: Optional[bool] = None, output_hidden_states: Optional[bool] = None,
+                return_dict: Optional[bool] = None, **kwargs):
+
+        if not self.embeddings_bound:
+            # initialize prefix module to interact with the model
+            PrefixModule.add_to(self.config.model_name, self.module_dict['model'],
+                                self.module_dict['prefix_embeddings'])
+            self.embeddings_bound = True
+
+        return super().forward(input_ids, attention_mask, inputs_embeds, labels, output_attentions,
+                               output_hidden_states, return_dict, **kwargs)
 
 
 class PrefixEmbeddings(nn.Module):
@@ -366,17 +430,6 @@ class PrefixEmbeddings(nn.Module):
         elif self.prefix_mode == 'linear':
             params = torch.empty(total_layers - self.insert_layer - 1, 2, n_prefix_tokens, dim)
             self.prefix_embeddings_layer = torch.nn.Parameter(nn.init.normal_(params, std=0.5))
-
-    def get_parameters(self) -> dict:
-        params = {'embeddings_insert': self.prefix_embeddings_insert.data}
-        if self.prefix_embeddings_layer is not None:
-            params['embeddings_layer'] = self.prefix_embeddings_layer.data
-        return params
-
-    def set_parameters(self, embeddings_insert, embeddings_layer=None, **kwargs):
-        self.prefix_embeddings_insert.data = embeddings_insert
-        if embeddings_layer is not None:
-            self.prefix_embeddings_layer.data = embeddings_layer
 
     def insert(self, x: torch.Tensor, attn_mask: torch.Tensor = None):
         # x: (bs, ..., seq_length, dim)
@@ -457,34 +510,44 @@ class PrefixEmbeddings(nn.Module):
 class PrefixModule(nn.Module):
     def __init__(self, prefix_embeddings: PrefixEmbeddings):
         super().__init__()
-        self.prefix_embeddings: PrefixEmbeddings = prefix_embeddings
+        self.prefix_embeddings = prefix_embeddings
+        self.old_module = None
 
-    def add_to_model(self, model):
+    @staticmethod
+    def remove_from_model(model):
         assert False, 'Not implemented yet'
 
     def forward(self, **kwargs):
         assert False, 'Not implemented yet'
 
     @staticmethod
-    def from_name(model_name, model, embeddings):
+    def add_to(model_name, model, embeddings):
         if model_name == 'distilbert-base-uncased':
-            return PrefixDistilbert(model, embeddings)
-        if model_name == 'roberta-base':
-            return PrefixRoberta(model, embeddings)
-        assert False, f'Model "{model_name}" is not supported!'
+            PrefixDistilbert(model, embeddings)
+        elif model_name == 'roberta-base':
+            PrefixRoberta(model, embeddings)
+        else:
+            assert False, f'Model "{model_name}" is not supported!'
 
     @staticmethod
-    def add_to(model_name, model, embeddings):
-        PrefixModule.from_name(model_name, model, embeddings).add_to_model(model)
+    def remove_from(model_name, model):
+        if model_name == 'distilbert-base-uncased':
+            PrefixDistilbert.remove_from_model(model)
+        if model_name == 'roberta-base':
+            PrefixRoberta.remove_from_model(model)
+        assert False, f'Model "{model_name}" is not supported!'
 
 
 class PrefixDistilbert(PrefixModule):
     def __init__(self, model: DistilBertForMaskedLM, prefix_embeddings: PrefixEmbeddings):
         super().__init__(prefix_embeddings)
         self.layer = model.distilbert.transformer.layer
-
-    def add_to_model(self, model):
+        self.old_module = (model.distilbert.transformer,)  # in parenthesis so that Module.parameters() won't pick it up
         model.distilbert.transformer = self
+
+    @staticmethod
+    def remove_from_model(model):
+        model.distilbert.transformer = model.distilbert.transformer.old_module[0]
 
     def forward(
             self,
@@ -556,8 +619,12 @@ class PrefixRoberta(PrefixModule):
         self.layer = model.roberta.encoder.layer
         self.gradient_checkpointing = model.roberta.encoder.gradient_checkpointing
 
-    def add_to_model(self, model):
+        self.old_module = (model.roberta.encoder,)  # in parenthesis so that Module.parameters() won't pick it up
         model.roberta.encoder = self
+
+    @staticmethod
+    def remove_from_model(model):
+        model.roberta.encoder = model.roberta.encoder.old_module[0]
 
     def forward(
             self,

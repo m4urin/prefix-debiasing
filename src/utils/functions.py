@@ -1,5 +1,5 @@
 from math import ceil
-from typing import Any, Iterable, Union, TypeVar, Generic
+from typing import Any, Iterable, Union
 
 import pandas as pd
 from matplotlib import pyplot as plt
@@ -146,5 +146,3 @@ def plot_scalars(results, title, folder, skip_warmup=0):
     plt.legend()
     folder.write_file(title + '.png', plt)
     plt.clf()
-
-

@@ -1,0 +1,9 @@
+model_name,model_type,objective,training_time (minutes),n_parameters,epochs,batch_size,lr,num_warmup_steps,seed,prefix_mode,prefix_layers,n_prefix_tokens,prefix_finetune
+roberta-base,base,kaneko,0.0,0,,,,,,,,,
+roberta-base,base,coreference-resolution,0.0,124795866,0.0,16.0,0.0002,10.0,42.0,,,,
+roberta-base,finetune,kaneko,0.0,124697433,0.0,32.0,3e-05,100.0,42.0,,,,
+roberta-base,finetune,coreference-resolution,0.0,124795866,0.0,16.0,0.0002,10.0,42.0,,,,
+roberta-base,prefix,kaneko,0.0,141312,0.0,32.0,0.0002,100.0,42.0,linear,all,8.0,
+roberta-base,prefix,coreference-resolution,0.0,239745,0.0,16.0,0.0002,10.0,42.0,linear,all,8.0,prefix
+roberta-base,prefix,coreference-resolution,0.0,124795866,0.0,16.0,0.0002,10.0,42.0,linear,all,8.0,model
+roberta-base,prefix,coreference-resolution,0.0,124937178,0.0,16.0,0.0002,10.0,42.0,linear,all,8.0,all

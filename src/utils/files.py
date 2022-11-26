@@ -260,4 +260,3 @@ def write_file(path: str, data: Any):
 
 def get_all_files(path: str = None, extension: str = None):
     return get_folder(path).get_all_files(extension)
-

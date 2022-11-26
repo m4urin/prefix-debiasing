@@ -4,5 +4,6 @@
   "prefix_mode": ["linear"],
   "prefix_layers": ["all"],
   "n_prefix_tokens": [8, 16, 24, 32],
+  "prefix_finetune": ["model"],
   "objective": ["kaneko", "coreference-resolution"]
 }

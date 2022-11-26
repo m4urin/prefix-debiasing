@@ -11,21 +11,22 @@ MODEL_NAMES = ['distilbert-base-uncased', 'roberta-base']
 MODEL_TYPES = ['base', 'finetune', 'prefix']
 PREFIX_MODES = ['identity', 'linear', 'replace']
 PREFIX_LAYERS = ['all', 'half']
+PREFIX_FINETUNES = ['prefix', 'model', 'all']
 OBJECTIVES = ['kaneko', 'coreference-resolution']
 EXTENSIONS = ['coreference-resolution']
 
 LR = {
     'kaneko': {
-        'finetune': 3e-5,
-        'prefix': 2e-4
+        'finetune': 2e-5,
+        'prefix': 1e-4
     },
     'coreference-resolution': {
-        'base': 4e-5,
-        'finetune': 4e-5,
-        'prefix': 4e-5
+        'base': 5e-5,
+        'finetune': 5e-5,
+        'prefix': 5e-5
     }
 }
-EPOCHS = {'kaneko': 3, 'coreference-resolution': 3}
+EPOCHS = {'kaneko': 3, 'coreference-resolution': 8}
 BATCH_SIZE = {'kaneko': 32, 'coreference-resolution': 16}
 WARMUP = {'kaneko': 100, 'coreference-resolution': 10}
 SEED = 42
@@ -113,6 +114,7 @@ class ModelConfig(Config):
                  prefix_mode: str = None,
                  prefix_layers: Union[str, int] = None,
                  n_prefix_tokens: int = None,
+                 prefix_finetune: str = None,
                  **kwargs):
         self.model_name = model_name
         self.model_type = model_type
@@ -121,6 +123,8 @@ class ModelConfig(Config):
             self.prefix_mode = prefix_mode
             self.prefix_layers = convert(prefix_layers, int, prefix_layers)
             self.n_prefix_tokens = n_prefix_tokens
+            if not self.is_default():
+                self.prefix_finetune = prefix_finetune
         if self.can_train():
             self.epochs = EPOCHS[objective]
             self.batch_size = BATCH_SIZE[objective]
@@ -137,8 +141,10 @@ class ModelConfig(Config):
             self.verify_attribute(errors, 'prefix_mode', text=PREFIX_MODES)
             self.verify_attribute(errors, 'prefix_layers', numeric=(int, 1, 24), text=PREFIX_LAYERS)
             self.verify_attribute(errors, 'n_prefix_tokens', numeric=(int, 1, 65))
+            if not self.is_default():
+                self.verify_attribute(errors, 'prefix_finetune', text=PREFIX_FINETUNES)
         if self.can_train():
-            self.verify_attribute(errors, 'epochs', numeric=(int, 1, 10))
+            self.verify_attribute(errors, 'epochs', numeric=(int, 0, 100))
             self.verify_attribute(errors, 'batch_size', numeric=(int, 1, 65))
             self.verify_attribute(errors, 'lr', numeric=(float, 1e-7, 0.1))
             self.verify_attribute(errors, 'num_warmup_steps', numeric=(int, 1, 10000))
@@ -153,8 +159,11 @@ class ModelConfig(Config):
     def is_base(self) -> bool:
         return self.model_type == 'base'
 
+    def is_default(self):
+        return self.objective == 'kaneko'
+
     def without_extensions(self):
-        if self.objective != 'kaneko':
+        if not self.is_default():
             as_dict = self.to_dict()
             as_dict['objective'] = 'kaneko'
             return ModelConfig(**as_dict)
@@ -164,7 +173,7 @@ class ModelConfig(Config):
         return ModelConfig(self.model_name, 'base', 'kaneko')
 
     def can_train(self):
-        return not (self.is_base() and self.objective == 'kaneko')
+        return not (self.is_base() and self.is_default())
 
     @staticmethod
     def from_hyper_params(file: dict):
@@ -182,7 +191,8 @@ class ModelConfig(Config):
                        'objective': "{}",
                        'prefix_mode': "mode={}",
                        'prefix_layers': "layers={}",
-                       'n_prefix_tokens': "n_tok={}"}
+                       'n_prefix_tokens': "n_tok={}",
+                       'prefix_finetune': "param={}"}
         info = ', '.join([s.format(getattr(self, k)) for k, s in param_names.items() if hasattr(self, k)])
         return f"ModelConfig({info})"
 
@@ -192,7 +202,8 @@ class ModelConfig(Config):
                 'objective': "{}",
                 'prefix_mode': "mode={}",
                 'prefix_layers': "layers={}",
-                'n_prefix_tokens': "n_tok={}"}
+                'n_prefix_tokens': "n_tok={}",
+                'prefix_finetune': "param={}"}
         info = [s.format(getattr(self, k)) for k, s in info.items() if hasattr(self, k)]
         info.append(f"hash={hashlib.sha1(str(self.to_dict()).encode()).hexdigest()[:8]}")
         info = ','.join(info)
@@ -251,4 +262,5 @@ if __name__ == '__main__':
     for m in ModelConfig.from_hyper_params(data):
         print(m.get_filename())
         print(m)
+        print()
 

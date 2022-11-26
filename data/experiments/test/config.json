@@ -1,8 +1,9 @@
 {
   "model_name": ["roberta-base"],
-  "model_type": ["base", "prefix"],
+  "model_type": ["base", "finetune", "prefix"],
   "prefix_mode": ["linear"],
   "prefix_layers": ["all"],
   "n_prefix_tokens": [8],
+  "prefix_finetune": ["prefix", "model", "all"],
   "objective": ["kaneko", "coreference-resolution"]
 }
