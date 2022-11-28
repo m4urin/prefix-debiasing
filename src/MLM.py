@@ -819,7 +819,7 @@ class EvalMLM(nn.Module):
 
     def coref(self, sentences: list[list[str]], subject_idx: list[int], batch_size=32):
         with torch.no_grad():
-            info = f'Coreference resolution (bs={batch_size}, model={self.model.config.model_name})'
+            info = f'Coreference resolution'
             logits = []
             for batch in nested_loop(zip(sentences, subject_idx), batch_size=batch_size, progress_bar=info):
                 # (bs, 1)

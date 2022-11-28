@@ -192,7 +192,7 @@ class Entailment(Metric):
             model = model.eval_modus()
             logits = model.entailment(list(self.data['sentence1']), list(self.data['sentence2']))
             predictions = (logits <= 0).float()
-            labels = torch.tensor(self.data['label'], dtype=torch.float32)
+            labels = torch.tensor(self.data['label'], dtype=torch.float32, device=predictions.device)
             score = torch.abs(labels - predictions).mean().item()
             return round(100 * score, 2)
 
@@ -256,7 +256,7 @@ class WinoGender(WSC):
         super().__init__(metric_name='winogender', folder_name='winogender')
 
     def prepare_data(self, folder: IOFolder):
-        return folder.read_file('wino_gender_test.parquet')
+        return folder.read_file('winogender.parquet')
 
 
 class SST2(Metric):
@@ -275,7 +275,7 @@ class SST2(Metric):
             model = model.eval_modus()
             logits = model.sentiment_analysis(list(self.data['sentence']))
             predictions = (logits <= 0).float()
-            labels = torch.tensor(self.data['label'], dtype=torch.float32)
+            labels = torch.tensor(self.data['label'], dtype=torch.float32, device=predictions.device)
             score = torch.abs(labels - predictions).mean().item()
             return round(100 * score, 2)
 

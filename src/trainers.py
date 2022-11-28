@@ -31,8 +31,8 @@ class OrthogonalTrainer(Trainer):
         result = ModelResult(config)
         start_time = time()
         last_progress_bar_update = start_time - 10
-        train_loss = LatestStats(50)
         total_steps = config.epochs * ceil(len(self.dataset_attribute) / (config.batch_size // 2))
+        train_loss = LatestStats(total_steps // 20)
 
         optimizer = AdamW(params=model.get_parameters_to_train(), lr=config.lr)
         scheduler = get_linear_schedule_with_warmup(optimizer=optimizer,
@@ -140,8 +140,10 @@ class EntailmentTrainer(Trainer):
         title = f'{self.metric_name}: Train head only..'
         progress_bar = tqdm(total=total_train_steps + total_test_steps)
 
-        loss_train, loss_test = LatestStats(), LatestStats()
-        accuracy_train, accuracy_test = LatestStats(), LatestStats()
+        loss_train = LatestStats(min(4, total_train_steps // (10 * config.epochs)))
+        accuracy_train = LatestStats(min(4, total_train_steps // (10 * config.epochs)))
+        loss_test = LatestStats(total_test_steps // config.epochs)
+        accuracy_test = LatestStats(total_test_steps // config.epochs)
 
         for epoch in range(config.epochs):
             model.train()

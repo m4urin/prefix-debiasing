@@ -24,10 +24,12 @@ HEAD_SIZE = {k: 2 for k in OBJECTIVES}
 
 
 LR['kaneko'] = {'finetune': 2e-5, 'prefix': 1e-4}
+LR['wsc'] = {'base': 1e-5, 'finetune': 1e-5, 'prefix': 1e-5}
 EPOCHS['kaneko'] = 3
+EPOCHS['wsc'] = 10
 BATCH_SIZE['kaneko'] = 32
 BATCH_SIZE['sst2'] = 24
-BATCH_SIZE['wsc'] = 16
+BATCH_SIZE['wsc'] = 24
 WARMUP['kaneko'] = 100
 HEAD_SIZE['kaneko'] = 0
 HEAD_SIZE['sst2'] = 1
