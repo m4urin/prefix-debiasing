@@ -1,14 +1,14 @@
 .idea/
 data/.cache/
+data/eval/glue/
+data/train/kaneko/va/
+data/word_lists/
+
 scripts/test.py
-data/eval/glue
-data/eval/glue/train/*
-data/eval/glue/validation/*
 data/eval/winogender/winogender.parquet
-data/train/kaneko/va/*
 data/train/kaneko/attributes.parquet
 data/train/kaneko/stereotypes.parquet
-data/word_lists/*
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
