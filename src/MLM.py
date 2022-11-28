@@ -43,13 +43,15 @@ class MLM(nn.Module):
         if 'model' not in self.module_dict:
             self.module_dict['model'] = AutoModelForMaskedLM.from_pretrained(self.config.model_name)
 
-        coref_tag = 'coreference-resolution'
-        if self.config.objective == coref_tag and coref_tag not in self.module_dict:
-            self.module_dict[coref_tag] = nn.Sequential(OrderedDict({
-                'f1': nn.Linear(self.dim * 2, 64),
-                'swish': nn.SiLU(),
-                'f2': nn.Linear(64, 1)
-            }))
+        if not self.config.is_default():
+            # requires a head
+            head_name = f"{self.config.objective}_head"
+            if head_name not in self.module_dict:
+                self.module_dict[head_name] = nn.Sequential(OrderedDict({
+                    'f1': nn.Linear(self.dim * self.config.head_size, 32 * self.config.head_size),
+                    'swish': nn.SiLU(),
+                    'f2': nn.Linear(32 * self.config.head_size, 1)
+                }))
 
     def get_parameters_to_train(self) -> List[nn.Parameter]:
         raise NotImplementedError('Not implemented yet.')
@@ -101,7 +103,7 @@ class MLM(nn.Module):
                                          return_dict=return_dict)
 
     def eval_modus(self):
-        return EvalMLM(self)
+        return EvalMLM(self.eval())
 
     def tokenize(self, batch: Union[list[str], np.ndarray]) -> BatchEncoding:
         if isinstance(batch, np.ndarray):
@@ -172,35 +174,29 @@ class MLM(nn.Module):
         encoded['span_idx_words'] = torch.IntTensor(span_idx_words)
         return encoded.to(DEVICE)
 
-    def get_hidden_states(self, encoded: BatchEncoding) -> torch.Tensor:
+    def get_hidden_states(self, encoded: BatchEncoding,
+                          return_cls: bool = False,
+                          layers: Union[int, list[int]] = None
+                          ) -> torch.Tensor:
         """
         Parameters:
             encoded: A BatchEncoding from model.tokenize(..)
+            layers: layer/layers to keep
+            return_cls: if True, the first token of each sentence will be returned
         Returns:
-            Tensor (bs, seq_length, n_layers, dim)
+            depending on 'return_cls' and 'layers' -> Tensor (bs, seq_length?, n_layers?, dim)
         """
         # embeddings: (n_layers, bs, seq_length, dim)
         embeddings = torch.stack(self(**encoded.to(DEVICE), output_hidden_states=True)['hidden_states'])
         # embeddings: (bs, seq_length, n_layers, dim)
         embeddings = embeddings.permute((1, 2, 0, 3))
 
-        return embeddings
+        if return_cls:
+            # embeddings: (bs, n_layers, dim)
+            embeddings = embeddings[:, 0]
 
-    def get_sentence_embeddings(self, encoded: BatchEncoding, layer: int = None) -> torch.Tensor:
-        """
-        Embed a list of sentences to be evaluated
-        sentences: a list of individual sentences
-        layer: all layers if layer is None
-        returns: tensor of size (bs, embedding_dim)
-        """
-        # embeddings: (bs, seq_length, n_layers, dim)
-        embeddings = self.get_hidden_states(encoded)
-        # embeddings: (bs, n_layers, dim)
-        embeddings = embeddings[:, 0]
-
-        # embeddings: (bs, layer??, dim)
-        if layer is not None:
-            embeddings = embeddings[:, layer]
+        if layers is not None:
+            embeddings = embeddings[..., layers, :]
 
         return embeddings
 
@@ -265,8 +261,10 @@ class MLM(nn.Module):
     def get_coref_predictions(self,
                               encoding_with_spans: BatchEncoding,
                               subject_indices: Union[list[int], torch.Tensor]):
+        if 'wsc_head' not in self.module_dict:
+            raise Exception(f"Module 'wsc_head' not present in MLM with config: {self.config}")
         # (n_spans, dim)
-        embeddings = self.get_span_embeddings(encoding_with_spans, layer=-1, reduce='first')
+        embeddings = self.get_span_embeddings(encoding_with_spans, layer=-1, reduce='mean')
         dims = embeddings.size()
         # (n_sentences, 2, dim)
         embeddings = embeddings.reshape(dims[0] // 2, 2, dims[1])
@@ -281,17 +279,33 @@ class MLM(nn.Module):
         # (n_sentences, 2 x dim)
         embeddings = embeddings.permute((1, 0, 2)).flatten(start_dim=-2, end_dim=-1)
 
-        return self.module_dict['coreference-resolution'](embeddings)
+        return self.module_dict['wsc_head'](embeddings)
+
+    def get_entailment_predictions(self, encoding1: BatchEncoding, encoding2: BatchEncoding):
+        head_name = f"{self.config.objective}_head"
+        if self.config.objective not in {'mrpc', 'stsb', 'rte', 'wnli'} or head_name not in self.module_dict:
+            raise Exception(f"Module '{head_name}' not present in MLM with config: {self.config}")
+
+        # (bs, 2 x dim)
+        hidden = torch.cat((
+            self.get_hidden_states(encoding1, return_cls=True, layers=-1),
+            self.get_hidden_states(encoding2, return_cls=True, layers=-1)), dim=-1)
+
+        return self.module_dict[head_name](hidden)
+
+    def get_sentiment_analysis(self, encoding: BatchEncoding):
+        head_name = f"{self.config.objective}_head"
+        if self.config.objective != 'sst2' or head_name not in self.module_dict:
+            raise Exception(f"Module '{head_name}' not present in MLM with config: {self.config}")
+
+        return self.module_dict[head_name](self.get_hidden_states(encoding, return_cls=True, layers=-1))
 
     def __str__(self) -> str:
         config_info = str(self.config).replace('\n', '\n\t')
         modules_info = ', '.join([f"'{k}' ({is_frozen(v)})" for k, v in self.module_dict.items()])
-        parameters_info = ', '.join([f"'{k}' ({is_frozen(v)})" for k, v in self._parameters_dict.items()])
         return f"MLM (\n" \
                f"\t{config_info}\n" \
-               f"\ttask={self.task}\n" \
                f"\tmodule_dict=[{modules_info}]\n" \
-               f"\tparameters_dict=[{parameters_info}]\n" \
                f")"
 
     def __repr__(self) -> str:
@@ -343,9 +357,11 @@ class PrefixMLM(MLM):
         self.embeddings_bound = False
 
         if self.config.is_default() or self.config.prefix_finetune == 'prefix':
-            self._parameters_to_train = list_parameters(self.module_dict['prefix_embeddings'])
+            self._parameters_to_train = list_parameters([v for k, v in self.module_dict.items()
+                                                         if k != 'model'])
         elif self.config.prefix_finetune == 'model':
-            self._parameters_to_train = list_parameters(self.module_dict['model'])
+            self._parameters_to_train = list_parameters([v for k, v in self.module_dict.items()
+                                                         if k != 'prefix_embeddings'])
         else:
             self._parameters_to_train = list_parameters(self.module_dict)
 
@@ -361,14 +377,7 @@ class PrefixMLM(MLM):
                 # initialize prefix module to interact with the model
                 PrefixModule.remove_from(self.config.model_name, self.module_dict['model'])
                 self.embeddings_bound = False
-            if self.config.prefix_finetune == 'model':
-                result = nn.ModuleDict({k: v for k, v in self.module_dict.items() if k != 'prefix_embeddings'})
-            else:
-                result = nn.ModuleDict({k: v for k, v in self.module_dict.items()})
-        #print('>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>')
-        #print(self.config)
-        #print(result)
-        #print('>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>')
+            result = nn.ModuleDict({k: v for k, v in self.module_dict.items()})
         return freeze(result)
 
     def forward(self, input_ids: Optional[torch.LongTensor] = None, attention_mask: Optional[torch.FloatTensor] = None,
@@ -533,9 +542,10 @@ class PrefixModule(nn.Module):
     def remove_from(model_name, model):
         if model_name == 'distilbert-base-uncased':
             PrefixDistilbert.remove_from_model(model)
-        if model_name == 'roberta-base':
+        elif model_name == 'roberta-base':
             PrefixRoberta.remove_from_model(model)
-        assert False, f'Model "{model_name}" is not supported!'
+        else:
+            assert False, f'Model "{model_name}" is not supported!'
 
 
 class PrefixDistilbert(PrefixModule):
@@ -743,8 +753,9 @@ class EvalMLM(nn.Module):
             info = f'Embed sentences (bs={batch_size}, model={self.model.config.model_name})'
             for sent_batch in nested_loop(sentences, batch_size=batch_size, progress_bar=info):
                 encoded = self.model.tokenize(sent_batch)
-                embeddings = self.model.get_sentence_embeddings(encoded, layer=-1)  # (bs, dim)
-                sentence_embeddings.append(embeddings.cpu())
+                # (bs, dim)
+                embeddings = self.model.get_hidden_states(encoded, layers=-1, return_cls=True)  # (bs, dim)
+                sentence_embeddings.append(embeddings)
             return torch.cat(sentence_embeddings, dim=0)
 
     def embed_sentences_dict(self, sentences: dict[str, list[str]], batch_size=32) -> dict[torch.Tensor]:
@@ -781,8 +792,41 @@ class EvalMLM(nn.Module):
                 encoded = self.model.tokenize(sent_batch)
                 # (bs, n_masks, n_word_ids)
                 p = self.model.get_mask_probabilities(encoded, word_ids, output_tensor=True)
-                probabilities.append(p.cpu())
+                probabilities.append(p)
             return torch.cat(probabilities, dim=0)  # (n_sentences, n_masks, n_word_ids)
 
+    def entailment(self, sentence1: list[str], sentence2: list[str], batch_size=16) -> torch.Tensor:
+        with torch.no_grad():
+            info = f'Entailments (bs={batch_size}, model={self.model.config.model_name})'
+            logits = []
+            for sent_batch in nested_loop(zip(sentence1, sentence2), batch_size=batch_size, progress_bar=info):
+                encoded1 = self.model.tokenize([s1 for s1, _ in sent_batch])
+                encoded2 = self.model.tokenize([s2 for _, s2 in sent_batch])
+                # (bs, 1)
+                p = self.model.get_entailment_predictions(encoded1, encoded2)
+                logits.append(p)
+            return torch.cat(logits, dim=0).flatten()  # (n_sentences)
+
+    def sentiment_analysis(self, sentences: list[str], batch_size=32):
+        with torch.no_grad():
+            info = f'Sentiment Analysis (bs={batch_size}, model={self.model.config.model_name})'
+            logits = []
+            for sent_batch in nested_loop(sentences, batch_size=batch_size, progress_bar=info):
+                # (bs, 1)
+                p = self.model.get_sentiment_analysis(self.model.tokenize(sent_batch))
+                logits.append(p)
+            return torch.cat(logits, dim=0).flatten()  # (n_sentences)
+
+    def coref(self, sentences: list[list[str]], subject_idx: list[int], batch_size=32):
+        with torch.no_grad():
+            info = f'Coreference resolution (bs={batch_size}, model={self.model.config.model_name})'
+            logits = []
+            for batch in nested_loop(zip(sentences, subject_idx), batch_size=batch_size, progress_bar=info):
+                # (bs, 1)
+                encoded = self.model.tokenize_with_spans([s for s, _ in batch])
+                p = self.model.get_coref_predictions(encoded, [i for _, i in batch])
+                logits.append(p)
+            return torch.cat(logits, dim=0).flatten()  # (n_sentences)
+
     def train_modus(self):
-        return self.model
+        return self.model.train()

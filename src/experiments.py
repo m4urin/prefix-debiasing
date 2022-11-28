@@ -44,10 +44,10 @@ class Experiment:
             parameters = None
             if not config.is_default():
                 print('Load debiased parameters..')
-                parameters = self.read(config.without_extensions()).parameters
+                parameters = self.read(config.to_default()).parameters
                 if parameters is None:
                     raise ValueError(f'Cannot train {config}, because the base model '
-                                     f'({config.without_extensions()}) does not exist.')
+                                     f'({config.to_default()}) does not exist.')
             model = MLM.from_config(config, parameters)
             result = train_model(model)
             self.write(result)
@@ -74,7 +74,7 @@ class Experiment:
                                     'training_time (minutes)': round(result.total_training_time / 60, 1),
                                     'n_parameters': result.n_parameters,
                                     **result.evaluations})
-        df = dataframe_from_dicts(all_evaluations).fillna('')
+        df = dataframe_from_dicts(all_evaluations).fillna('').sort_values(by=['objective'])
         self.work_dir.write_file(f'result.csv', df)
         print(df.to_string(), '\n')
         return self

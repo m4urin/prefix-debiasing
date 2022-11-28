@@ -8,6 +8,18 @@ from torch import nn
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
+def pearson_correlation_coefficient(y_true: Union[torch.tensor, list[float]],
+                                    y_pred: Union[torch.tensor, list[float]]) -> float:
+    if isinstance(y_true, list):
+        y_true = torch.tensor(y_true)
+    if isinstance(y_pred, list):
+        y_pred = torch.tensor(y_pred)
+    y_true = y_true.to(device=DEVICE, dtype=torch.float32)
+    y_pred = y_pred.to(device=DEVICE, dtype=torch.float32)
+    score = torch.corrcoef(torch.stack((y_true, y_pred)))[0, 1].item()
+    return float(score)
+
+
 def repeat_stacked(x: torch.Tensor, n: int):
     return x.unsqueeze(0).repeat(n, *([1] * len(x.size())))
 

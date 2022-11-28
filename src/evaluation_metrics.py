@@ -1,5 +1,6 @@
 import copy
 from math import ceil
+from typing import Any
 
 import torch
 from torch import cosine_similarity
@@ -10,7 +11,7 @@ from src.dependencies.weat import run_test
 from src.MLM import MLM
 from src.utils.files import get_folder, IOFolder
 from src.utils.functions import nested_loop
-from src.utils.pytorch import fix_string_batch
+from src.utils.pytorch import fix_string_batch, pearson_correlation_coefficient
 
 
 class Metric:
@@ -18,10 +19,10 @@ class Metric:
         self.metric_name = metric_name
         self.data = self.prepare_data(get_folder(f'eval/{folder_name}'))
 
-    def prepare_data(self, folder: IOFolder):
+    def prepare_data(self, folder: IOFolder) -> Any:
         raise NotImplementedError('Not implemented yet')
 
-    def eval_model(self, model: MLM) -> dict:
+    def eval_model(self, model: MLM) -> Any:
         raise NotImplementedError('Not implemented yet')
 
 
@@ -45,7 +46,7 @@ class SEAT(Metric):
             result = {}
             for test_name, test in nested_loop(self.data.items(), progress_bar=f'SEAT'):
                 encoded_sentences = model.tokenize(sum([test[t]['examples'] for t in keys], []))
-                sentences_embedded = model.get_sentence_embeddings(encoded_sentences, layer=-1).cpu()  # (bs, dim)
+                sentences_embedded = model.get_hidden_states(encoded_sentences, layers=-1, return_cls=True).cpu()  # (bs, dim)
                 c = 0
                 for t in keys:
                     sents = test[t]['examples']
@@ -53,7 +54,7 @@ class SEAT(Metric):
                     c += len(sents)
 
                 esize, pval = run_test(test, 100000)
-                result[test_name] = {'effect_size': round(esize, 5), 'p_val': round(pval, 5)}
+                result[test_name] = {'effect_size': round(esize, 4), 'p_val': round(pval, 4)}
             return result
 
 
@@ -163,149 +164,120 @@ class LPBS(Metric):
                 ILPS = torch.abs(ILPS[..., 0] - ILPS[..., 1])
 
                 result[test_name] = {
-                    'bias_score': ILPS.mean(dim=(0, 1)).item(),
-                    'bias_score_std': ILPS.std(dim=(0, 1)).item()
+                    'bias_score': round(ILPS.mean(dim=(0, 1)).item(), 4),
+                    'bias_score_std': round(ILPS.std(dim=(0, 1)).item(), 4)
                 }
             pbar.close()
             return result
 
 
-class WinoGenderSimilarity(Metric):
+class Entailment(Metric):
+    def __init__(self, metric_name: str):
+        assert metric_name in {'mrpc', 'stsb', 'rte', 'wnli'}
+        super().__init__(metric_name=metric_name, folder_name='glue')
+
+    def prepare_data(self, folder: IOFolder):
+        """ Dataset:
+                    'sentence1': str,
+                    'sentence2': str,
+                    'label': float,
+                    ('use_someone': int,
+                    'pronoun_class': int,
+                    'subject_is_occupation': int)
+                """
+        return folder.read_file(f'validation/{self.metric_name}.parquet')
+
+    def eval_model(self, model: MLM):
+        with torch.no_grad():
+            model = model.eval_modus()
+            logits = model.entailment(list(self.data['sentence1']), list(self.data['sentence2']))
+            predictions = (logits <= 0).float()
+            labels = torch.tensor(self.data['label'], dtype=torch.float32)
+            score = torch.abs(labels - predictions).mean().item()
+            return round(100 * score, 2)
+
+
+class MRPC(Entailment):
     def __init__(self):
-        super().__init__(metric_name='winogender_similarity', folder_name='winogender')
+        super().__init__('mrpc')
+
+
+class STS_B(Entailment):
+    def __init__(self):
+        super().__init__('stsb')
+
+    def eval_model(self, model: MLM):
+        with torch.no_grad():
+            model = model.eval_modus()
+            logits = model.entailment(list(self.data['sentence1']), list(self.data['sentence2']))
+            predictions = torch.sigmoid(logits)
+            score = pearson_correlation_coefficient(self.data['label'], predictions)
+            return round(100 * score, 2)
+
+
+class RTE(Entailment):
+    def __init__(self):
+        super().__init__('rte')
+
+
+class WNLI(Entailment):
+    def __init__(self):
+        super().__init__('wnli')
+
+
+class WSC(Metric):
+    def __init__(self, metric_name='wsc', folder_name='glue'):
+        super().__init__(metric_name=metric_name, folder_name=folder_name)
+
+    def prepare_data(self, folder: IOFolder):
+        return folder.read_file(f'validation/{self.metric_name}.parquet')
+
+    def eval_model(self, model: MLM):
+        """ Dataset:
+            'sentence': str,
+            'subject_idx': subject_index // 2,
+            'label': float
+        """
+        with torch.no_grad():
+            model = model.eval_modus()
+
+            #(n_sentences)
+            logits = model.coref(self.data['sentence'], self.data['subject_idx'])
+            y_pred = (logits <= 0).float()
+
+            y_true = torch.tensor(self.data['label'], device=y_pred.device, dtype=torch.float32)
+
+            score = torch.abs(y_pred - y_true).mean().item()
+            return round(100 * score, 2)
+
+
+class WinoGender(WSC):
+    def __init__(self):
+        super().__init__(metric_name='winogender', folder_name='winogender')
 
     def prepare_data(self, folder: IOFolder):
         return folder.read_file('wino_gender_test.parquet')
 
-    def eval_model(self, model: MLM) -> dict:
 
-        """ Dataset:
-            'sentence': result,
-            'subject_idx': subject_index // 2,
-            'pronoun_idx': pronoun_index // 2,
-            'label': true_label,
-            'use_someone': use_someone,
-            'pronoun_class': pronoun_class,
-            'subject_is_occupation': is_occupation
-        """
-        with torch.no_grad():
-            batch_size = 64
-            bound_step = 0.01
-
-            iterations_emb = len(self.data) // batch_size
-            if len(self.data) % batch_size != 0:
-                iterations_emb += 1
-
-            progress_bar = tqdm(total=iterations_emb)
-
-            model.eval()
-            all_embeddings = []
-            progress_bar.set_description('WinoGender (similarity)')
-            for x in DataLoader(self.data, batch_size=batch_size):
-                subject_indices, labels = x['subject_idx'], x['label']
-                encoding_with_spans = model.tokenize_with_spans(fix_string_batch(x['sentence']))
-
-                # (n_spans, dim)
-                embeddings = model.get_span_embeddings(encoding_with_spans, layer=-1, reduce='first')
-                dims = embeddings.size()
-                # (n_sentences, 2, dim)
-                embeddings = embeddings.reshape(dims[0] // 2, 2, dims[1])
-
-                if not isinstance(subject_indices, torch.Tensor):
-                    subject_indices = torch.tensor(subject_indices)
-                subject_indices = subject_indices.long()
-
-                # ordered for subject/pronoun: (2, n_sentences, dim)
-                embeddings = torch.stack((embeddings[range(len(subject_indices)), subject_indices],
-                                          embeddings[range(len(subject_indices)), 1 - subject_indices]))
-
-                # append (2[subject,pronoun], bs, dim)
-                all_embeddings.append(embeddings)
-                progress_bar.update(1)
-
-            # (2[subject,pronoun], n, dim)
-            all_embeddings = torch.cat(all_embeddings, dim=1)
-
-            # (n)
-            sim = cosine_similarity(all_embeddings[0], all_embeddings[1], dim=-1)
-            # (n)
-            y = torch.tensor(self.data['label'], dtype=torch.float32, device=sim.device)
-
-            best_acc, best_bound = -1, None
-            for bound in torch.arange(-1.0+bound_step, 1.0, bound_step):
-                y_pred = (sim >= bound).int()
-                acc = 1.0 - torch.abs(y_pred - y).float().mean()
-                if acc > best_acc:
-                    best_acc = acc.item()
-                    best_bound = bound.item()
-
-            return {'accuracy': round(100 * best_acc, 2), 'bound': round(best_bound, 2)}
-
-
-class WinoGender(Metric):
+class SST2(Metric):
     def __init__(self):
-        super().__init__(metric_name='winogender_finetune', folder_name='winogender')
+        super().__init__(metric_name='sst2', folder_name='glue')
 
     def prepare_data(self, folder: IOFolder):
-        return folder.read_file('wino_gender_test.parquet')
-
-    def eval_model(self, model: MLM) -> dict:
-
         """ Dataset:
-            'sentence': result,
-            'subject_idx': subject_index // 2,
-            'pronoun_idx': pronoun_index // 2,
-            'label': true_label,
-            'use_someone': use_someone,
-            'pronoun_class': pronoun_class,
-            'subject_is_occupation': is_occupation
+            'sentence': str,
+            'label': float,
         """
+        return folder.read_file(f'validation/{self.metric_name}.parquet')
+
+    def eval_model(self, model: MLM):
         with torch.no_grad():
-            model.eval()
-            y_pred = []
-            for x in tqdm(DataLoader(self.data, batch_size=32), desc='WinoGender (coref head)'):
-                enc = model.tokenize_with_spans(fix_string_batch(x['sentence']))
-                # (bs, 1)
-                logits = model.get_coref_predictions(enc, x['subject_idx'])
-                y_pred.append((logits <= 0).float())
-            # (n)
-            y_pred = torch.cat(y_pred, dim=0).flatten()
-            y_true = torch.tensor(self.data['label'], device=y_pred.device, dtype=torch.float32)
-
-            return {'accuracy': round(100 * torch.abs(y_pred - y_true).mean().item(), 2)}
-
-
-class Coref(Metric):
-    def __init__(self):
-        super().__init__(metric_name='coref', folder_name='coref')
-
-    def prepare_data(self, folder: IOFolder):
-        return folder.read_file('coref_test.parquet')
-
-    def eval_model(self, model: MLM) -> dict:
-
-        """ Dataset:
-            'sentence': result,
-            'subject_idx': subject_index // 2,
-            'pronoun_idx': pronoun_index // 2,
-            'label': true_label,
-            'use_someone': use_someone,
-            'pronoun_class': pronoun_class,
-            'subject_is_occupation': is_occupation
-        """
-        with torch.no_grad():
-            model.eval()
-            y_pred = []
-            for x in tqdm(DataLoader(self.data, batch_size=32), desc='Coreference-resolution'):
-                enc = model.tokenize_with_spans(fix_string_batch(x['sentence']))
-                # (bs, 1)
-                logits = model.get_coref_predictions(enc, x['subject_idx'])
-                y_pred.append((logits > 0).float().detach())
-            # (n)
-            y_pred = torch.cat(y_pred, dim=0).flatten()
-            y_true = torch.tensor(self.data['label'], device=y_pred.device, dtype=torch.float32)
-
-            return {'accuracy': round(100 * (1.0 - torch.abs(y_pred - y_true).mean().item()), 2)}
+            model = model.eval_modus()
+            logits = model.sentiment_analysis(list(self.data['sentence']))
+            predictions = (logits <= 0).float()
+            labels = torch.tensor(self.data['label'], dtype=torch.float32)
+            score = torch.abs(labels - predictions).mean().item()
+            return round(100 * score, 2)
 
 
 class MetricsRegister:
@@ -320,13 +292,17 @@ class MetricsRegister:
 
 
 METRIC_REGISTER = MetricsRegister({
-    'kaneko': [SEAT, LPBS, WinoGenderSimilarity],
-    'coreference-resolution': [SEAT, LPBS, Coref, WinoGenderSimilarity, WinoGender]
+    'kaneko': [SEAT, LPBS],
+    'mrpc': [SEAT, LPBS, MRPC],
+    'stsb': [SEAT, LPBS, STS_B],
+    'rte': [SEAT, LPBS, RTE],
+    'wnli': [SEAT, LPBS, WNLI],
+    'sst2': [SEAT, LPBS, SST2],
+    'wsc': [SEAT, LPBS, WSC, WinoGender]
 })
 """
 METRIC_REGISTER = MetricsRegister({
     'kaneko': [],
-    'coreference-resolution': []
 })
 """
 

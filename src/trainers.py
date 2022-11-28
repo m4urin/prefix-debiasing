@@ -11,7 +11,7 @@ from torch.optim import AdamW
 
 from src.MLM import MLM
 from src.utils.config import ModelResult
-from src.utils.files import read_file
+from src.utils.files import read_file, get_folder
 from src.utils.printing import pretty_number
 from src.utils.pytorch import DEVICE, fix_string_batch, freeze, unfreeze
 
@@ -40,7 +40,7 @@ class OrthogonalTrainer(Trainer):
                                                     num_training_steps=int(total_steps * 1.04))
 
         v_a: torch.Tensor = read_file(f'train/kaneko/va/{config.model_name}.pt').to(DEVICE).detach()
-        base_model = freeze(MLM.from_config(config.as_base()).train()).to(DEVICE)
+        base_model = freeze(MLM.from_config(config.to_base()).train()).to(DEVICE)
 
         progress_bar = tqdm(total=total_steps)
         for epoch in range(config.epochs):
@@ -101,10 +101,20 @@ class OrthogonalTrainer(Trainer):
         return result.finish_training(start_time, model.get_parameters_to_save())
 
 
-class CorefTrainer(Trainer):
-    def __init__(self):
-        self.dataset_train = read_file('train/coref/coref_train.parquet')
-        self.dataset_test = read_file('train/coref/coref_test.parquet')
+class EntailmentTrainer(Trainer):
+    def __init__(self, metric_name):
+        self.metric_name = metric_name
+        folder = get_folder('eval/glue')
+        self.dataset_train = folder.read_file(f'train/{metric_name}.parquet')
+        self.dataset_test = folder.read_file(f'validation/{metric_name}.parquet')
+
+    def process_batch(self, model: MLM, batch):
+        """ default for mrpc, stsb, rte and wnli """
+        enc1 = model.tokenize(batch['sentence1'])
+        enc2 = model.tokenize(batch['sentence2'])
+        logits = model.get_entailment_predictions(enc1, enc2)
+        labels = batch['label']
+        return logits, labels
 
     def train(self, model: MLM) -> ModelResult:
         config = model.config
@@ -112,22 +122,22 @@ class CorefTrainer(Trainer):
 
         start_time = time()
         last_progress_bar_update = start_time - 10
-
         current_train_step = 0
+
         total_train_steps = config.epochs * ceil(len(self.dataset_train) / config.batch_size)
         total_test_steps = config.epochs * ceil(len(self.dataset_test) / config.batch_size)
-        switch_optim = total_train_steps // 5
+        switch_optim = total_train_steps // 10
 
+        head_name = f"{config.objective}_head"
         freeze(model)
-        unfreeze(model.module_dict['coreference-resolution'])
-
-        optimizer = AdamW(params=model.module_dict['coreference-resolution'].parameters(), lr=config.lr * 5)
+        unfreeze(model.module_dict[head_name])
+        optimizer = AdamW(params=model.module_dict[head_name].parameters(), lr=config.lr * 10)
         scheduler = get_linear_schedule_with_warmup(optimizer=optimizer,
                                                     num_warmup_steps=config.num_warmup_steps,
                                                     num_training_steps=int(switch_optim * 1.04))
         criterion = torch.nn.BCEWithLogitsLoss()
 
-        title = 'Train co-ref head only..'
+        title = f'{self.metric_name}: Train head only..'
         progress_bar = tqdm(total=total_train_steps + total_test_steps)
 
         loss_train, loss_test = LatestStats(), LatestStats()
@@ -138,30 +148,24 @@ class CorefTrainer(Trainer):
             for iteration, x in enumerate(DataLoader(self.dataset_train.shuffle(seed=config.seed + epoch),
                                                      batch_size=config.batch_size)):
                 if current_train_step == switch_optim:
-                    title = 'Train complete model..'
+                    title = f'{self.metric_name}: Train complete model..'
                     optimizer = AdamW(params=model.get_parameters_to_train(), lr=config.lr)
                     scheduler = get_linear_schedule_with_warmup(optimizer=optimizer,
                                                                 num_warmup_steps=config.num_warmup_steps,
                                                                 num_training_steps=int((total_train_steps -
                                                                                         switch_optim) * 1.04))
                 optimizer.zero_grad()
-                sentences, subject_idx, labels = fix_string_batch(x['sentence']), x['subject_idx'], x['label']
-
+                model.zero_grad()
+                logits, labels = self.process_batch(model, x)
                 labels = labels.unsqueeze(-1).to(device=DEVICE, dtype=torch.float32).detach()
-                enc = model.tokenize_with_spans(sentences)
-                y_pred = model.get_coref_predictions(enc, subject_idx)
-                loss = criterion(y_pred, labels)
+                loss = criterion(logits, labels)
                 loss.backward()
                 optimizer.step()
                 scheduler.step()
                 loss = loss.item()
 
-                #if current_train_step % 40 == 0:
-                #    print(sentences)
-                #    print(torch.cat((y_pred, labels), dim=-1)[:6])
-
-                accuracy_train.add(torch.abs((y_pred <= 0).float() - labels).sum().item(), len(sentences))
-                loss_train.add(loss, len(sentences))
+                accuracy_train.add(torch.abs((logits <= 0).float() - labels).sum().item(), len(labels))
+                loss_train.add(loss, len(labels))
                 result.add_scalar(f'loss/train', loss)
 
                 if time() - last_progress_bar_update > 1:
@@ -181,14 +185,12 @@ class CorefTrainer(Trainer):
                 last_progress_bar_update = time() - 10
                 model.eval()
                 for iteration, x in enumerate(DataLoader(self.dataset_test, batch_size=config.batch_size)):
-                    sentences, subject_idx, labels = fix_string_batch(x['sentence']), x['subject_idx'], x['label']
+                    logits, labels = self.process_batch(model, x)
                     labels = labels.unsqueeze(-1).to(device=DEVICE, dtype=torch.float32).detach()
-                    enc = model.tokenize_with_spans(sentences)
-                    y_pred = model.get_coref_predictions(enc, subject_idx)
-                    loss = criterion(y_pred, labels).item()
+                    loss = criterion(logits, labels).item()
 
-                    accuracy_test.add(torch.abs((y_pred <= 0).float() - labels).sum().item(), len(sentences))
-                    loss_test.add(loss, len(sentences))
+                    accuracy_test.add(torch.abs((logits <= 0).float() - labels).sum().item(), len(labels))
+                    loss_test.add(loss, len(labels))
                     result.add_scalar(f'loss/test', loss)
 
                     if time() - last_progress_bar_update > 1:
@@ -204,8 +206,52 @@ class CorefTrainer(Trainer):
         return result.finish_training(start_time, model.get_parameters_to_save())
 
 
+class MRPCTrainer(EntailmentTrainer):
+    def __init__(self):
+        super().__init__('mrpc')
+
+
+class STS_BTrainer(EntailmentTrainer):
+    def __init__(self):
+        super().__init__('stsb')
+
+
+class RTETrainer(EntailmentTrainer):
+    def __init__(self):
+        super().__init__('rte')
+
+
+class WNLITrainer(EntailmentTrainer):
+    def __init__(self):
+        super().__init__('wnli')
+
+
+class SST2Trainer(EntailmentTrainer):
+    def __init__(self):
+        super().__init__('sst2')
+
+    def process_batch(self, model: MLM, batch):
+        """ default for wsc """
+        enc = model.tokenize(batch['sentence'])
+        logits = model.get_sentiment_analysis(enc)
+        labels = batch['label']
+        return logits, labels
+
+
+class WSCTrainer(EntailmentTrainer):
+    def __init__(self):
+        super().__init__('wsc')
+
+    def process_batch(self, model: MLM, batch):
+        """ default for wsc """
+        enc = model.tokenize_with_spans(fix_string_batch(batch['sentence']))
+        logits = model.get_coref_predictions(enc, batch['subject_idx'])
+        labels = batch['label']
+        return logits, labels
+
+
 class LatestStats:
-    def __init__(self, last_n=30):
+    def __init__(self, last_n=50):
         self.counter = 0
         self.last_n = last_n
         self.batch_sizes = torch.ones(last_n, dtype=torch.float32) * 1e-20
@@ -245,14 +291,17 @@ class TrainRegister:
 
 TRAIN_REGISTER = TrainRegister({
     'kaneko': OrthogonalTrainer,
-    'coreference-resolution': CorefTrainer
+    'mrpc': MRPCTrainer,
+    'stsb': STS_BTrainer,
+    'rte': RTETrainer,
+    'wnli': WNLITrainer,
+    'sst2': SST2Trainer,
+    'wsc': WSCTrainer
 })
 
 
 def train_model(model: MLM):
     if model.config.can_train():
-        result = TRAIN_REGISTER[model.config.objective].train(model)
-        result.evaluations = {}  # remove any evaluations, since they are not valid anymore
-        return result
+        return TRAIN_REGISTER[model.config.objective].train(model)
     else:
         return ModelResult(model.config).finish_training(time(), model.get_parameters_to_save())
