@@ -1,7 +1,7 @@
 {
   "model_name": ["roberta-base"],
   "model_type": ["base", "finetune", "prefix"],
-  "prefix_mode": ["identity", "linear", "replace"]],
+  "prefix_mode": ["identity", "linear", "replace"],
   "prefix_layers": ["all"],
   "n_prefix_tokens": [8],
   "prefix_finetune": ["model"],
