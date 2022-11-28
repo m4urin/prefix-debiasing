@@ -5,5 +5,5 @@
   "prefix_layers": ["all"],
   "n_prefix_tokens": [8],
   "prefix_finetune": ["model"],
-  "objective": ["kaneko", "sst2", "mrpc", "stsb", "rte", "wnli", "wsc"]
+  "objective": ["kaneko", "sst2", "wnli", "wsc"]
 }
