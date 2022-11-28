@@ -1,6 +1,7 @@
 .idea/
 data/.cache/
 scripts/test.py
+data/eval/glue
 data/eval/glue/train/*
 data/eval/glue/validation/*
 data/eval/winogender/winogender.parquet
