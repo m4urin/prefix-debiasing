@@ -1,0 +1,9 @@
+{
+  "model_name": ["distilbert-base-uncased", "roberta-base", "bert-base-uncased"],
+  "model_type": ["base", "finetune", "prefix"],
+  "debias_method": ["", "kaneko"],
+  "prefix_mode": ["identity", "linear", "replace"],
+  "prefix_layers": ["all", "half", 3],
+  "n_prefix_tokens": [5, 10, 20, 30],
+  "downstream_task": ["", "sst2", "mrpc", "stsb", "rte", "wnli", "wsc"]
+}

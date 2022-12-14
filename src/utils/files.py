@@ -81,9 +81,9 @@ class IOFolder:
         self.name = os.path.split(path)[-1]
         self.parent: IOFolder = parent
         self.files: dict[str, IOFile] = {f: IOFile.from_path(self.from_root(f), self) for f in os.listdir(path)
-                                         if os.path.isfile(self.from_root(f))}
+                                         if os.path.isfile(self.from_root(f)) and not f.startswith('.')}
         self.folders: dict[str, IOFolder] = {f: IOFolder(self.from_root(f), parent=self) for f in os.listdir(path)
-                                             if os.path.isdir(self.from_root(f))}
+                                             if os.path.isdir(self.from_root(f)) and not f.startswith('.')}
 
     def from_root(self, path: str) -> str:
         return os.path.join(self.root, path)
@@ -193,7 +193,7 @@ class TextFile(IOFile):
 
     def read(self) -> list[str]:
         with open(self.full_path, encoding="utf-8") as file:
-            return [line.rstrip() for line in file.readlines()]
+            return [line for line in [line.rstrip() for line in file.readlines()] if len(line) > 0]
 
 
 class CSVDataFrameFile(IOFile):
@@ -237,7 +237,7 @@ class CompressedImageFile(IOFile):
         raise Exception('Images should not be read.')
 
 
-DATA_DIR = IOFolder(os.path.join(Path(os.path.dirname(os.path.abspath(__file__))).parents[1], 'data'))
+DATA_DIR = IOFolder(str(Path(os.path.dirname(os.path.abspath(__file__))).parents[1]))
 
 
 def get_folder(path: str = None, create_if_not_exists=False):
@@ -260,3 +260,11 @@ def write_file(path: str, data: Any):
 
 def get_all_files(path: str = None, extension: str = None):
     return get_folder(path).get_all_files(extension)
+
+
+def exists(path: str):
+    return os.path.exists(DATA_DIR.from_root(path))
+
+
+if __name__ == '__main__':
+    print(DATA_DIR)

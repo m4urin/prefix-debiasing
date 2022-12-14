@@ -3,26 +3,28 @@ from math import ceil
 from typing import Any
 
 import torch
-from torch import cosine_similarity
+from datasets import Dataset
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from src.dependencies.weat import run_test
-from src.MLM import MLM
+from src.evaluations.evaluation_utils import get_mask_topk
+from src.language_models.language_model import LanguageModel
+from src.data.structs.model_config import ModelConfig
 from src.utils.files import get_folder, IOFolder
 from src.utils.functions import nested_loop
-from src.utils.pytorch import fix_string_batch, pearson_correlation_coefficient
+from src.utils.pytorch import pearson_correlation_coefficient, fix_string_batch
 
 
 class Metric:
     def __init__(self, metric_name: str, folder_name: str):
         self.metric_name = metric_name
-        self.data = self.prepare_data(get_folder(f'eval/{folder_name}'))
+        self.data = self.prepare_data(get_folder(f'data/eval/{folder_name}'))
 
     def prepare_data(self, folder: IOFolder) -> Any:
         raise NotImplementedError('Not implemented yet')
 
-    def eval_model(self, model: MLM) -> Any:
+    def eval_model(self, model: LanguageModel) -> Any:
         raise NotImplementedError('Not implemented yet')
 
 
@@ -40,13 +42,14 @@ class SEAT(Metric):
     def prepare_data(self, folder: IOFolder):
         return {f.name: f.read() for f in folder.get_all_files(extension='.json')}
 
-    def eval_model(self, model: MLM) -> dict:
+    def eval_model(self, model: LanguageModel) -> dict:
         with torch.no_grad():
             keys = ['targ1', 'targ2', 'attr1', 'attr2']
             result = {}
             for test_name, test in nested_loop(self.data.items(), progress_bar=f'SEAT'):
                 encoded_sentences = model.tokenize(sum([test[t]['examples'] for t in keys], []))
-                sentences_embedded = model.get_hidden_states(encoded_sentences, layers=-1, return_cls=True).cpu()  # (bs, dim)
+                # (bs, dim)
+                sentences_embedded = model.get_embeddings(encoded_sentences, output_cls_token=True).cpu().numpy()
                 c = 0
                 for t in keys:
                     sents = test[t]['examples']
@@ -62,7 +65,8 @@ class LPBS(Metric):
     """
     Log Probability Bias Score (LPBS)
 
-    Kurita, Keita, et al. "Measuring bias in contextualized word representations." arXiv preprint arXiv:1906.07337 (2019).
+    Kurita, Keita, et al. "Measuring bias in contextualized word representations."
+    arXiv preprint arXiv:1906.07337 (2019).
     https://arxiv.org/pdf/1906.07337
     """
 
@@ -72,7 +76,7 @@ class LPBS(Metric):
     def prepare_data(self, folder: IOFolder):
         return {f.name: f.read() for f in folder.get_all_files(extension='.json')}
 
-    def eval_model(self, model: MLM) -> dict:
+    def eval_model(self, model: LanguageModel) -> dict:
         with torch.no_grad():
             result = {}
 
@@ -96,9 +100,9 @@ class LPBS(Metric):
                                                            enumerate(files[f_i]['tests'][t_i]['targets'])
                                                            if w_i not in error_tokens]
             if len(ignored_words) > 0:
-                print(
-                    f"The following words cannot be converted to a single token by '{model.config.model_name}': {ignored_words}, \n"
-                    f"therefore the following pairs will be ignored in the test {ignored_pairs}")
+                print(f"The following words cannot be converted to a single token by '{model.config.model_name}': "
+                      f"{ignored_words}, \n"
+                      f"therefore the following pairs will be ignored in the test {ignored_pairs}")
 
             total_iterations = 0
             for test in files.values():
@@ -122,8 +126,7 @@ class LPBS(Metric):
                     masked_sentences = [t.replace('[TARGET]', MASK_token).replace('[ATTRIBUTE]', MASK_token) for t in
                                         templates]
                     # (n_templates, n_masks, n_targets)
-                    p_prior = model.get_mask_probabilities(model.tokenize(masked_sentences), target_ids,
-                                                           output_tensor=True)
+                    p_prior = model.get_mask_probabilities(model.tokenize(masked_sentences), target_ids)
                     # (n_templates, n_target_pairs, bias_class_dim)
                     mask_idx = [(0 if '[ATTRIBUTE]' in t.split('[TARGET]')[1] else 1) for t in templates]
                     p_prior = p_prior[list(range(len(templates))), mask_idx] \
@@ -139,7 +142,7 @@ class LPBS(Metric):
                     # (ALL_templates, n_targets)
                     p_tgt = []
                     for batch in nested_loop(all_templates, batch_size=32):
-                        p = model.get_mask_probabilities(model.tokenize(batch), target_ids, output_tensor=True)[:, 0]
+                        p = model.get_mask_probabilities(model.tokenize(batch), target_ids)[:, 0]
                         p_tgt.append(p)
                         pbar.update(1)
                     p_tgt = torch.cat(p_tgt, dim=0)
@@ -171,9 +174,9 @@ class LPBS(Metric):
             return result
 
 
-class Entailment(Metric):
+class GLUETest(Metric):
     def __init__(self, metric_name: str):
-        assert metric_name in {'mrpc', 'stsb', 'rte', 'wnli'}
+        assert metric_name in {'sst2', 'mrpc', 'stsb', 'rte', 'wnli', 'wsc'}
         super().__init__(metric_name=metric_name, folder_name='glue')
 
     def prepare_data(self, folder: IOFolder):
@@ -187,52 +190,68 @@ class Entailment(Metric):
                 """
         return folder.read_file(f'validation/{self.metric_name}.parquet')
 
-    def eval_model(self, model: MLM):
+    def process_batch(self, model: LanguageModel, batch):
+        """ default for mrpc, stsb, rte and wnli """
+        subject_idx = None
+
+        if self.metric_name in {'sst2'}:
+            enc = model.tokenize(batch['sentence'])
+
+        elif self.metric_name in {'mrpc', 'stsb', 'rte', 'wnli'}:
+            enc = model.tokenize(list(zip(batch['sentence1'], batch['sentence2'])))
+
+        elif self.metric_name in {'wsc'}:
+            enc = model.tokenize_with_spans(fix_string_batch(batch['sentence']))
+            subject_idx = batch['subject_idx']
+
+        else:
+            raise ValueError(f"metric '{self.metric_name}' is not supported!")
+
+        # logits
+        return model.get_cls_predictions(enc, subject_idx)
+
+    def eval_model(self, model: LanguageModel):
         with torch.no_grad():
-            model = model.eval_modus()
-            logits = model.entailment(list(self.data['sentence1']), list(self.data['sentence2']))
-            predictions = (logits <= 0).float()
-            labels = torch.tensor(self.data['label'], dtype=torch.float32, device=predictions.device)
-            score = torch.abs(labels - predictions).mean().item()
+            model.eval()
+            logits = []
+            for batch in tqdm(DataLoader(self.data, batch_size=32)):
+                # (bs, 1)
+                logits.append(self.process_batch(model, batch))
+            # (n, 1)
+            logits = torch.cat(logits, dim=0)
+            labels = torch.tensor(self.data['label'], dtype=torch.float32, device=logits.device)
+            score = 1.0 - torch.abs(labels - (logits > 0).float()).mean().item()
             return round(100 * score, 2)
 
 
-class MRPC(Entailment):
+class WinoGender(Metric):
     def __init__(self):
-        super().__init__('mrpc')
-
-
-class STS_B(Entailment):
-    def __init__(self):
-        super().__init__('stsb')
-
-    def eval_model(self, model: MLM):
-        with torch.no_grad():
-            model = model.eval_modus()
-            logits = model.entailment(list(self.data['sentence1']), list(self.data['sentence2']))
-            predictions = torch.sigmoid(logits)
-            score = pearson_correlation_coefficient(self.data['label'], predictions)
-            return round(100 * score, 2)
-
-
-class RTE(Entailment):
-    def __init__(self):
-        super().__init__('rte')
-
-
-class WNLI(Entailment):
-    def __init__(self):
-        super().__init__('wnli')
-
-
-class WSC(Metric):
-    def __init__(self, metric_name='wsc', folder_name='glue'):
-        super().__init__(metric_name=metric_name, folder_name=folder_name)
+        super().__init__(metric_name='winogender', folder_name='winogender')
 
     def prepare_data(self, folder: IOFolder):
-        return folder.read_file(f'validation/{self.metric_name}.parquet')
+        return folder.read_file('winogender.parquet')
 
-    def eval_model(self, model: MLM):
+    def get_subset_data(self, dataset, pronoun_class=None, use_someone=None, subject_is_occupation=None):
+        if pronoun_class is None:
+            pronoun_class = [0, 1, 2]
+        elif not isinstance(pronoun_class, list):
+            pronoun_class = [pronoun_class]
+
+        if use_someone is None:
+            use_someone = [0, 1]
+        elif not isinstance(use_someone, list):
+            use_someone = [use_someone]
+
+        if subject_is_occupation is None:
+            subject_is_occupation = [0, 1]
+        elif not isinstance(subject_is_occupation, list):
+            subject_is_occupation = [subject_is_occupation]
+
+        return dataset.filter(lambda x: x['pronoun_class'] in pronoun_class and
+                                        x['use_someone'] in use_someone and
+                                        x['subject_is_occupation'] in subject_is_occupation)
+
+    def eval_model(self, model: LanguageModel):
         """ Dataset:
             'sentence': str,
             'subject_idx': subject_index // 2,
@@ -240,72 +259,61 @@ class WSC(Metric):
         """
         with torch.no_grad():
             model = model.eval_modus()
+            dataset = self.get_subset_data(self.data, use_someone=0)
+            all_preds = (model.coref(dataset['sentence'], dataset['subject_idx']) > 0).int()
+            all_trues = torch.tensor(dataset['label'], dtype=torch.float32, device=all_preds.device)
+            result = {'all': {
+                'true_preds': round((100 * all_preds.float().mean()).item(), 2),
+                'acc': round((100 * (1.0 - torch.abs(all_trues - all_preds.float()).mean())).item(), 2)
+            }}
 
-            #(n_sentences)
-            logits = model.coref(self.data['sentence'], self.data['subject_idx'])
-            y_pred = (logits <= 0).float()
+            dataset = dataset.to_dict()
+            dataset['pred'] = all_preds.tolist()
+            dataset = Dataset.from_dict(dataset)
 
-            y_true = torch.tensor(self.data['label'], device=y_pred.device, dtype=torch.float32)
+            for occ, occ_name in enumerate(['not_occupation', ' is_occupation']):
+                for gender, gender_name in enumerate(['male', 'female', 'neutral']):
+                    subset = self.get_subset_data(dataset, pronoun_class=gender, subject_is_occupation=occ)
+                    y_true = torch.tensor(subset['label'], dtype=torch.float32, device=all_preds.device)
+                    y_pred = torch.tensor(subset['pred'], dtype=torch.float32, device=all_preds.device)
+                    result[f'{occ_name}_{gender_name}_pronoun'] = {
+                        'true_preds': round((100 * y_pred.mean()).item(), 2),
+                        'acc': round((100 * (1.0 - torch.abs(y_true - y_pred).mean())).item(), 2)
+                    }
 
-            score = torch.abs(y_pred - y_true).mean().item()
-            return round(100 * score, 2)
+            return result
 
 
-class WinoGender(WSC):
+class QualityTest(Metric):
     def __init__(self):
-        super().__init__(metric_name='winogender', folder_name='winogender')
+        super().__init__('quality', 'quality')
 
     def prepare_data(self, folder: IOFolder):
-        return folder.read_file('winogender.parquet')
+        return [
+            ('I am walking my [MASK] on a leash. Otherwise, he might bite someone.', 'dog'),
+            ('Two men in the bar start a [MASK].', 'conversation'),
+            ('My [MASK] gave birth to me.', 'mother'),
+            ('I unlock the door and open the [MASK].', 'door'),
+            ('With these sports [MASK], I can run even faster.', 'shoes'),
+            ('Mary is a doctor. [MASK] saved many people!', 'she')
+        ]
+
+    def eval_model(self, model: LanguageModel):
+        mask_token = model.tokenizer.convert_ids_to_tokens(model.tokenizer.mask_token_id)
+        return get_mask_topk(model, [s.replace('[MASK]', mask_token) for s, _ in self.data], k=10)
+
+    def compare_models(self, model_configs: list[ModelConfig], top_k_words: list[list[str]]):
+        for s_i, (sent, expected) in enumerate(self.data):
+            print(f"{sent}\n"
+                  f"\texpected: {expected}")
+            for c, topks in zip(model_configs, top_k_words):
+                print(f"{c}: {topks[s_i]}")
 
 
-class SST2(Metric):
-    def __init__(self):
-        super().__init__(metric_name='sst2', folder_name='glue')
+def run_metrics(model: LanguageModel) -> dict:
+    if model.config.is_downstream():
+        metrics = [SEAT(), LPBS(), GLUETest(model.config.downstream_task)]
+    else:
+        metrics = [SEAT(), LPBS()]
 
-    def prepare_data(self, folder: IOFolder):
-        """ Dataset:
-            'sentence': str,
-            'label': float,
-        """
-        return folder.read_file(f'validation/{self.metric_name}.parquet')
-
-    def eval_model(self, model: MLM):
-        with torch.no_grad():
-            model = model.eval_modus()
-            logits = model.sentiment_analysis(list(self.data['sentence']))
-            predictions = (logits <= 0).float()
-            labels = torch.tensor(self.data['label'], dtype=torch.float32, device=predictions.device)
-            score = torch.abs(labels - predictions).mean().item()
-            return round(100 * score, 2)
-
-
-class MetricsRegister:
-    def __init__(self, constructors: dict[str, list[type]]):
-        self.metric_constructors = constructors
-        self.metrics = {}
-
-    def __getitem__(self, objective) -> list[Metric]:
-        if objective not in self.metrics:
-            self.metrics[objective] = [cls() for cls in self.metric_constructors[objective]]
-        return self.metrics[objective]
-
-
-METRIC_REGISTER = MetricsRegister({
-    'kaneko': [SEAT, LPBS],
-    'mrpc': [SEAT, LPBS, MRPC],
-    'stsb': [SEAT, LPBS, STS_B],
-    'rte': [SEAT, LPBS, RTE],
-    'wnli': [SEAT, LPBS, WNLI],
-    'sst2': [SEAT, LPBS, SST2],
-    'wsc': [SEAT, LPBS, WSC, WinoGender]
-})
-"""
-METRIC_REGISTER = MetricsRegister({
-    'kaneko': [],
-})
-"""
-
-
-def run_metrics(model: MLM) -> dict:
-    return {metric.metric_name: metric.eval_model(model) for metric in METRIC_REGISTER[model.config.objective]}
+    return {m.metric_name: m.eval_model(model) for m in metrics}

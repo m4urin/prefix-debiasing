@@ -3,7 +3,7 @@
   "model_type": ["base", "finetune", "prefix"],
   "prefix_mode": ["linear"],
   "prefix_layers": ["all"],
-  "n_prefix_tokens": [8],
-  "prefix_finetune": ["model"],
-  "objective": ["kaneko", "sst2", "mrpc", "stsb", "rte", "wnli", "wsc"]
+  "n_prefix_tokens": [24],
+  "prefix_finetune": ["model", "prefix", "all"],
+  "objective": ["kaneko", "mrpc", "rte", "wsc"]
 }

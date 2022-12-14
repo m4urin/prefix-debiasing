@@ -1,11 +1,10 @@
 # folders
 .idea/
-data/eval/glue/
-data/train/kaneko/va/
-data/train/ml_head/
 data/word_lists/
 experiments/outputs/
 src/test/
+*.parquet
+*.pt
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
