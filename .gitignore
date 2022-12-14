@@ -1,16 +1,11 @@
 # folders
 .idea/
-data/.cache/
 data/eval/glue/
 data/train/kaneko/va/
+data/train/ml_head/
 data/word_lists/
-
-# files
-scripts/test.py
-data/eval/winogender/winogender.parquet
-data/train/kaneko/attributes.parquet
-data/train/kaneko/stereotypes.parquet
-
+experiments/outputs/
+src/test/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
