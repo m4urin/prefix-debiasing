@@ -12,7 +12,7 @@ from torch.optim import AdamW
 
 from src.data.structs.results import TrainResult
 from src.language_models.language_model import LanguageModel
-from src.data.preprocess_data import get_kaneko_data, get_ml_head_data
+from src.data.preprocess_data import get_kaneko_data, get_ml_head_data, get_probe_data
 from src.utils.files import get_folder
 from src.utils.printing import pretty_number
 from src.utils.pytorch import DEVICE, fix_string_batch, freeze, unfreeze
@@ -98,6 +98,109 @@ class MLHeadTrainer(Trainer):
             progress_bar.update()
 
         save_img('MLHead', total_loss, 100, config)
+        return result.finish_training(start_time, model)
+
+
+class ProbeTrainer(Trainer):
+    def process_batch(self, model: LanguageModel, batch):
+        enc = model.tokenize_with_spans(fix_string_batch(batch['sentences']))
+        # (n_spans, dim) == (bs, dim)
+        embeddings = model.get_span_embeddings(enc, reduce='mean')
+        return model.cls_head(embeddings), batch['label']
+
+    def train(self, model: LanguageModel) -> TrainResult:
+        train_dataset, eval_dataset, _ = get_probe_data()
+        config = model.config
+        result = TrainResult(config)
+        all_losses = []
+
+        start_time = time()
+        last_progress_bar_update = start_time - 10
+        current_train_step = 0
+
+        total_train_steps = config.epochs * ceil(len(train_dataset) / config.batch_size)
+        total_test_steps = config.epochs * ceil(len(eval_dataset) / config.batch_size)
+        switch_optim = int(0.15 * total_train_steps)
+
+        freeze(model)
+        optimizer = AdamW(params=unfreeze(model.cls_head).parameters(), lr=config.lr * 10)
+        scheduler = get_linear_schedule_with_warmup(optimizer=optimizer,
+                                                    num_warmup_steps=config.num_warmup_steps,
+                                                    num_training_steps=int(switch_optim * 1.02))
+        criterion = torch.nn.BCEWithLogitsLoss()
+
+        title = f'Probe: Train head only..'
+        progress_bar = tqdm(total=total_train_steps + total_test_steps)
+
+        loss_train = LatestStats(min(5, total_train_steps // (10 * config.epochs)))
+        accuracy_train = LatestStats(min(5, total_train_steps // (10 * config.epochs)))
+        loss_test = LatestStats(total_test_steps // config.epochs)
+        accuracy_test = LatestStats(total_test_steps // config.epochs)
+
+        for epoch in range(config.epochs):
+            model.train()
+            for iteration, x in enumerate(DataLoader(train_dataset.shuffle(seed=config.seed + epoch),
+                                                     batch_size=config.batch_size)):
+                if current_train_step == switch_optim:
+                    title = f'Probe: Train complete model..'
+                    freeze(model)
+                    optimizer = AdamW(params=unfreeze(model.get_parameters_to_train()), lr=config.lr)
+                    scheduler = get_linear_schedule_with_warmup(optimizer=optimizer,
+                                                                num_warmup_steps=config.num_warmup_steps,
+                                                                num_training_steps=int((total_train_steps -
+                                                                                        switch_optim) * 1.04))
+
+                optimizer.zero_grad()
+                model.zero_grad()
+                logits, labels = self.process_batch(model, x)
+                labels = labels.unsqueeze(-1).to(device=DEVICE, dtype=torch.float32)
+                loss = criterion(logits, labels)
+                loss.backward()
+                optimizer.step()
+                scheduler.step()
+                loss = loss.item()
+
+                accuracy_train.add(torch.abs((logits <= 0).float() - labels).sum().item(), len(labels))
+                loss_train.add(loss, len(labels))
+                result.add_scalar(f'loss/train', loss)
+                all_losses.append(loss)
+
+                if time() - last_progress_bar_update > 1:
+                    progress_bar.set_description(
+                        desc=f"{title} "
+                             f"epoch {epoch + 1}/{config.epochs}, "
+                             f"train_loss={pretty_number(loss_train.get_score(), 2)}, "
+                             f"train_acc={round(100 * accuracy_train.get_score(), 2)}, "
+                             f"test_loss={pretty_number(loss_test.get_score(), 2)}, "
+                             f"test_acc={round(100 * accuracy_test.get_score(), 2)}")
+                    last_progress_bar_update = time()
+
+                progress_bar.update()
+                current_train_step += 1
+
+            with torch.no_grad():
+                last_progress_bar_update = time() - 10
+                model.eval()
+                for iteration, x in enumerate(DataLoader(eval_dataset, batch_size=config.batch_size)):
+                    logits, labels = self.process_batch(model, x)
+                    labels = labels.unsqueeze(-1).to(device=DEVICE, dtype=torch.float32).detach()
+                    loss = criterion(logits, labels).item()
+
+                    accuracy_test.add(torch.abs((logits <= 0).float() - labels).sum().item(), len(labels))
+                    loss_test.add(loss, len(labels))
+                    result.add_scalar(f'loss/test', loss)
+
+                    if time() - last_progress_bar_update > 1:
+                        progress_bar.set_description(
+                            desc=f"{title} "
+                                 f"epoch {epoch + 1}/{config.epochs}, "
+                                 f"train_loss={pretty_number(loss_train.get_score(), 2)}, "
+                                 f"train_acc={round(100 * accuracy_train.get_score(), 2)}, "
+                                 f"test_loss={pretty_number(loss_test.get_score(), 2)}, "
+                                 f"test_acc={round(100 * accuracy_test.get_score(), 2)}")
+                        last_progress_bar_update = time()
+                    progress_bar.update()
+        save_img('ProbeTraining', all_losses, 100, config)
         return result.finish_training(start_time, model)
 
 
@@ -224,7 +327,7 @@ class GLUETrainer(Trainer):
 
         total_train_steps = config.epochs * ceil(len(self.dataset_train) / config.batch_size)
         total_test_steps = config.epochs * ceil(len(self.dataset_test) / config.batch_size)
-        switch_optim = total_train_steps // 10
+        switch_optim = int(0.15 * total_train_steps)
 
         freeze(model)
         optimizer = AdamW(params=unfreeze(model.cls_head).parameters(), lr=config.lr * 10)
@@ -303,6 +406,7 @@ class GLUETrainer(Trainer):
                                  f"test_loss={pretty_number(loss_test.get_score(), 2)}, "
                                  f"test_acc={round(100 * accuracy_test.get_score(), 2)}")
                         last_progress_bar_update = time()
+                    progress_bar.update()
 
         save_img('GLUETraining', all_losses, 100, config)
         return result.finish_training(start_time, model)
@@ -355,7 +459,8 @@ TRAIN_REGISTER = TrainRegister({
     'wnli': lambda: GLUETrainer('wnli'),
     'sst2': lambda: GLUETrainer('sst2'),
     'wsc': lambda: GLUETrainer('wsc'),
-    'ml_head': MLHeadTrainer
+    'ml_head': MLHeadTrainer,
+    'probe': ProbeTrainer
 })
 
 

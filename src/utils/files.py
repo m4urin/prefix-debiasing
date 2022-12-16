@@ -255,7 +255,12 @@ def read_file(path: str):
 
 
 def write_file(path: str, data: Any):
-    get_file(path).write(data)
+    dir_path, file_name = os.path.split(path)
+    if dir_path == '':
+        folder = DATA_DIR
+    else:
+        folder = get_folder(dir_path, create_if_not_exists=True)
+    folder.write_file(file_name, data)
 
 
 def get_all_files(path: str = None, extension: str = None):

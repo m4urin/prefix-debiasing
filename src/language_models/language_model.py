@@ -214,7 +214,7 @@ class LanguageModel(nn.Module):
                             output_cls_token: Optional[bool] = None
                             ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         """
-        :return: Tensors (n_spans, n_layers?, dim), (bs, seq_length, n_layers?, dim)?
+        :return: Tensors (n_spans, n_layers?, dim), (bs, n_layers?, dim)?
         """
         if not hasattr(encoding_with_spans, 'span_idx_sent'):
             raise ValueError('Please use tokenize_with_spans() to add spans.')

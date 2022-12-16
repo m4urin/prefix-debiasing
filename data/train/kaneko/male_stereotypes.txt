@@ -28,7 +28,6 @@ strong
 mechanic
 sniper
 boss
-skipper
 ceo
 doctor
 inventor

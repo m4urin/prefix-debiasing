@@ -11,7 +11,7 @@ from unidecode import unidecode
 
 from src.data.structs.model_config import ModelConfig, MODEL_NAMES
 from src.language_models.language_model import LanguageModel
-from src.utils.files import get_folder, read_file, exists
+from src.utils.files import get_folder, read_file, exists, write_file
 from src.utils.functions import stack_dicts, nested_loop
 
 MAX_SENTENCE_LENGTH = 450
@@ -86,11 +86,11 @@ def get_ml_head_data():
     folder = get_folder('data/train/ml_head', create_if_not_exists=True)
     batch_size = 64
     sentences = get_kaneko_split()
-    sentences = {w: [''.join(s) for s in v] for w, v in sentences['sentences']}
+    sentences = {w: [''.join(s) for s in v] for w, v in sentences['sentences'].items()}
     data_attr = []
     N = 10000
     while len(data_attr) < N:
-        for w in sentences.keys():
+        for w in set(sentences.keys()):
             if len(sentences[w]) == 0:
                 del sentences[w]
             else:
@@ -109,24 +109,24 @@ def get_ml_head_data():
 
 
 def get_probe_data():
-    dataset: tuple[Dataset, Dataset, Dataset] = get_if_stored([f'data/train/kaneko/probe/{n}.parquet'
-                                                               for n in ['train', 'eval', 'stereo']])
+    dataset: tuple[Dataset, Dataset, Dataset] = get_if_stored([f'data/eval/probe/{n}.parquet'
+                                                               for n in ['train', 'eval', 'stereotypes']])
     if dataset is not None:
         return dataset
-    folder = get_folder('data/train/kaneko/probe', create_if_not_exists=True)
+
     data = get_kaneko_split()
 
     word_groups: dict[str, list[str]] = data['word_groups']
     sentences = data['sentences']
 
     names = ['male_attributes', 'female_attributes', 'male_stereotypes', 'female_stereotypes']
-    n_samples = [7680, 7680, 2048, 2048]
+    n_samples = [5000, 5000, 1024, 1024]
     data = {}
     for n, s in zip(names, n_samples):
         d = []
         while len(d) < s:
             if len(word_groups[n]) == 0:
-                raise Exception(n, s)
+                raise Exception(f"{n}, max: {len(d)}")
             for w in [_w for _w in word_groups[n]]:
                 if len(sentences[w]) == 0:
                     word_groups[n].remove(w)
@@ -134,8 +134,8 @@ def get_probe_data():
                     d.append(sentences[w].pop())
         data[n] = d[:s]
     
-    m_attr_train, m_attr_eval = train_test_split(data['male_attributes'], test_size=1536)
-    f_attr_train, f_attr_eval = train_test_split(data['female_attributes'], test_size=1536)
+    m_attr_train, m_attr_eval = train_test_split(data['male_attributes'], test_size=1472)
+    f_attr_train, f_attr_eval = train_test_split(data['female_attributes'], test_size=1472)
     m_stereo = data['male_stereotypes']
     f_stereo = data['female_stereotypes']
 
@@ -152,6 +152,7 @@ def get_probe_data():
         'label': [0] * len(m_stereo) + [1] * len(f_stereo)
     })
 
+    folder = get_folder('data/eval/probe', create_if_not_exists=True)
     folder.write_file('train.parquet', train_dataset)
     folder.write_file('eval.parquet', eval_dataset)
     folder.write_file('stereotypes.parquet', stereo_dataset)

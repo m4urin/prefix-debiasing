@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from src.dependencies.weat import run_test
-from src.evaluations.evaluation_utils import get_mask_topk
+from src.evaluations.evaluation_utils import get_mask_topk, permutation_test
 from src.language_models.language_model import LanguageModel
 from src.data.structs.model_config import ModelConfig
 from src.utils.files import get_folder, IOFolder
@@ -284,6 +284,49 @@ class WinoGender(Metric):
             return result
 
 
+class ProbeTest(Metric):
+    def __init__(self):
+        super().__init__('probe', 'probe')
+
+    def prepare_data(self, folder: IOFolder):
+        return {n: folder.read_file(f'{n}.parquet') for n in ['eval', 'stereotypes']}
+
+    def get_result(self, model: LanguageModel, data: Dataset, progress_bar, batch_size):
+        logits = []
+        for batch in DataLoader(data, batch_size=batch_size):
+            enc = model.tokenize_with_spans(fix_string_batch(batch['sentences']))
+            # (bs, dim)
+            embeddings = model.get_span_embeddings(enc)
+            # (bs, 1)
+            logits.append(model.cls_head(embeddings))
+            progress_bar.update()
+        # (n_samples, 1)
+        logits = torch.cat(logits, dim=0)
+        conf = round(torch.abs(logits.sigmoid() - 0.5).mean().item(), 4)
+        pred = (logits > 0).float()
+        labels = torch.tensor(data['label'], dtype=torch.float32, device=pred.device).unsqueeze(-1)
+        correct = 1.0 - torch.abs(labels - pred)
+        acc = round(100 * correct.mean().item(), 2)
+        return correct, acc, conf
+
+    def eval_model(self, model: LanguageModel):
+        batch_size = 32
+        with torch.no_grad():
+            progress_bar = tqdm(desc='Intrinsic probe',
+                                total=sum(ceil(len(d) / batch_size) for d in self.data.values()))
+
+            eval_correct, eval_acc, eval_conf = self.get_result(model, self.data['eval'], progress_bar, batch_size)
+            st_correct, st_acc, st_conf = self.get_result(model, self.data['stereotypes'], progress_bar, batch_size)
+            progress_bar.close()
+            p_value = round(permutation_test(eval_correct, st_correct).item(), 5)
+            return {
+                'gender_acc': eval_acc,
+                'stereotype_acc': st_acc,
+                'stereotype_conf': st_conf,
+                'p_value': p_value
+            }
+
+
 class QualityTest(Metric):
     def __init__(self):
         super().__init__('quality', 'quality')
@@ -311,9 +354,11 @@ class QualityTest(Metric):
 
 
 def run_metrics(model: LanguageModel) -> dict:
+    metrics = [SEAT(), LPBS()]
     if model.config.is_downstream():
-        metrics = [SEAT(), LPBS(), GLUETest(model.config.downstream_task)]
-    else:
-        metrics = [SEAT(), LPBS()]
+        if model.config.downstream_task == 'probe':
+            metrics += [ProbeTest()]
+        else:
+            metrics += [GLUETest(model.config.downstream_task)]
 
     return {m.metric_name: m.eval_model(model) for m in metrics}

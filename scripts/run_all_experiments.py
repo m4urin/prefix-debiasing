@@ -1,4 +1,4 @@
 from src.experiments.experiment import run_experiments
 
-all_experiments = ['0_find_finetune_prefix', '1_find_n_tokens', '2_find_prefix_mode', '3_find_prefix_layers', '4_model_test', 'test']
-run_experiments(all_experiments[-2])
+all_experiments = ['2_find_prefix_mode', '4_model_test']
+run_experiments(all_experiments)

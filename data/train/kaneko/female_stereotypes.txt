@@ -16,7 +16,6 @@ makeup
 nurses
 beauty
 softball
-housekeeper
 maid
 sewing
 beautiful
@@ -31,7 +30,6 @@ romantic
 romance
 nurturing
 housekeeper
-housekeepers
 homemaker
 emotional
 assistant

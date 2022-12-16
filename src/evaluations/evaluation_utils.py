@@ -2,6 +2,7 @@ from typing import Union
 
 import numpy as np
 import torch
+from tqdm import trange
 
 from src.language_models.language_model import LanguageModel
 from src.utils.functions import nested_loop
@@ -89,7 +90,7 @@ def mask_probabilities(model: LanguageModel, sentences: list[str], words: list[s
     tokenizer = model.tokenizer
     mask_token_model = tokenizer.decode(tokenizer.mask_token_id)
 
-    word_ids = tokenizer.batch_encode_plus(['mom', 'dad', 'gentleman'], add_special_tokens=False)['input_ids']
+    word_ids = tokenizer.batch_encode_plus(words, add_special_tokens=False)['input_ids']
     for w, wid in zip(words, word_ids):
         if len(wid) > 1:
             raise Exception(f"'{w}' cannot be encoded to a single token")
@@ -102,12 +103,12 @@ def mask_probabilities(model: LanguageModel, sentences: list[str], words: list[s
     probabilities = []
     for sent_batch in nested_loop(sentences, batch_size=batch_size, progress_bar=progress_bar):
         # (bs, n_masks, n_word_ids) or bs x (n_masks, n_word_ids)
-        p = model.get_mask_probabilities(model.tokenize(sent_batch), word_ids, output_tensor=output_tensor)
+        p = model.get_mask_probabilities(model.tokenize(sent_batch), word_ids)
         probabilities.append(p)
 
     if output_tensor:
         # (n_sentences, n_masks, n_word_ids)
-        return torch.cat(probabilities, dim=0)  # (n_sentences, n_masks, n_word_ids)
+        return torch.cat(probabilities, dim=0)
     else:
         # n_sentences x (n_masks, n_word_ids)
         return sum(probabilities, [])
@@ -149,35 +150,13 @@ def get_mask_topk(model: LanguageModel, sentences: list[str], k: int = 3,
         return all_indices
 
 
-def get_sep_cls(model: LanguageModel, sentence1: list[str], sentence2: list[str], batch_size=16,
-                progress_bar: Union[bool, str] = False) -> torch.Tensor:
-    tokenizer = model.tokenizer
-    logits = []
-    for sent_batch in nested_loop(zip(sentence1, sentence2), batch_size=batch_size, progress_bar=progress_bar):
-        enc = tokenizer.batch_encode_plus(sent_batch, return_tensors='pt', padding=True).to(model.device)
-        p = self.model.get_entailment_predictions(encoded1, encoded2)
-        logits.append(p)
-    return torch.cat(logits, dim=0).flatten()  # (n_sentences)
-
-
-def sentiment_analysis(model: LanguageModel, sentences: list[str], batch_size=32):
-    with torch.no_grad():
-        info = f'Sentiment Analysis (bs={batch_size}, model={self.model.config.model_name})'
-        logits = []
-        for sent_batch in nested_loop(sentences, batch_size=batch_size, progress_bar=info):
-            # (bs, 1)
-            p = self.model.get_sentiment_analysis(self.model.tokenize(sent_batch))
-            logits.append(p)
-        return torch.cat(logits, dim=0).flatten()  # (n_sentences)
-
-
-def coref(model: LanguageModel, sentences: list[list[str]], subject_idx: list[int], batch_size=32):
-    with torch.no_grad():
-        info = f'Coreference resolution'
-        logits = []
-        for batch in nested_loop(zip(sentences, subject_idx), batch_size=batch_size, progress_bar=info):
-            # (bs, 1)
-            encoded = self.model.tokenize_with_spans([s for s, _ in batch])
-            p = self.model.get_coref_predictions(encoded, [i for _, i in batch])
-            logits.append(p)
-        return torch.cat(logits, dim=0).flatten()  # (n_sentences)
+def permutation_test(samples1: torch.Tensor, samples2: torch.Tensor, n: int = 20000):
+    # samples1: (n1,) , samples2: (n2,)
+    mean_diff_original = torch.abs(samples1.mean() - samples2.mean())
+    result = torch.zeros(n, dtype=torch.float32, device=samples1.device)
+    all_samples = torch.cat((samples1, samples2), dim=0)
+    n_all, n_subset = len(all_samples), len(samples1)
+    for i in trange(n, desc='Permutation test'):
+        idx = torch.randperm(n_all, device=all_samples.device)
+        result[i] = all_samples[idx[:n_subset]].mean() - all_samples[idx[n_subset:]].mean()
+    return (torch.abs(result) >= mean_diff_original).float().mean()

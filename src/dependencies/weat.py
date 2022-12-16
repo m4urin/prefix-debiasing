@@ -92,7 +92,7 @@ def p_val_permutation_test(X, Y, A, B, n_samples, cossims, parametric=False):
     A = np.array(list(A), dtype=np.int)
     B = np.array(list(B), dtype=np.int)
 
-    assert len(X) == len(Y)
+    assert len(X) == len(Y), f"X:{len(X)}, Y:{len(Y)}"
     size = len(X)
     s_wAB_memo = s_wAB(A, B, cossims=cossims)
     XY = np.concatenate((X, Y))

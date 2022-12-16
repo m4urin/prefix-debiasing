@@ -14,7 +14,7 @@ PREFIX_LAYERS = ['all', 'half']
 
 DEBIAS_PARAMS = {}
 for row_dict in read_file('experiments/inputs/parameters/debias_parameters.csv').to_dict(orient="records"):
-    _method, _type = row_dict['method'], row_dict['model_type']
+    _method, _type = row_dict['debias_method'], row_dict['model_type']
     if _method not in DEBIAS_PARAMS:
         DEBIAS_PARAMS[_method] = {}
     DEBIAS_PARAMS[_method][_type] = row_dict
