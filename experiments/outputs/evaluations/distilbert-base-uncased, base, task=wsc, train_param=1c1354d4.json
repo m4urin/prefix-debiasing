@@ -1,0 +1,48 @@
+{
+   "model_config": {
+      "model_name": "distilbert-base-uncased",
+      "model_type": "base",
+      "downstream_task": "wsc",
+      "head_size": 3,
+      "epochs": 20,
+      "batch_size": 24,
+      "lr": 2e-06,
+      "num_warmup_steps": 40,
+      "seed": 42
+   },
+   "evaluations": {
+      "seat": {
+         "6": {
+            "effect_size": 0.5821,
+            "p_val": 0.0004
+         },
+         "7": {
+            "effect_size": 0.0813,
+            "p_val": 0.3154
+         },
+         "8": {
+            "effect_size": 0.0431,
+            "p_val": 0.41
+         },
+         "stereo": {
+            "effect_size": 0.6032,
+            "p_val": 0.0
+         }
+      },
+      "lpbs": {
+         "adjectives": {
+            "bias_score": 0.4407,
+            "bias_score_std": 0.3656
+         },
+         "kaneko_stereotypes": {
+            "bias_score": 0.6533,
+            "bias_score_std": 0.5223
+         },
+         "occupations": {
+            "bias_score": 0.6236,
+            "bias_score_std": 0.5838
+         }
+      },
+      "wsc": 58.03
+   }
+}

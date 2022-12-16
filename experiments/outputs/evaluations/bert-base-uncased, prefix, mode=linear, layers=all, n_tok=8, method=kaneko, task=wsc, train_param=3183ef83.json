@@ -1,0 +1,52 @@
+{
+   "model_config": {
+      "model_name": "bert-base-uncased",
+      "model_type": "prefix",
+      "debias_method": "kaneko",
+      "prefix_mode": "linear",
+      "prefix_layers": "all",
+      "n_prefix_tokens": 8,
+      "downstream_task": "wsc",
+      "head_size": 3,
+      "epochs": 22,
+      "batch_size": 24,
+      "lr": 2e-06,
+      "num_warmup_steps": 40,
+      "seed": 42
+   },
+   "evaluations": {
+      "seat": {
+         "6": {
+            "effect_size": -0.2725,
+            "p_val": 0.9392
+         },
+         "7": {
+            "effect_size": 0.145,
+            "p_val": 0.1942
+         },
+         "8": {
+            "effect_size": -0.2952,
+            "p_val": 0.9409
+         },
+         "stereo": {
+            "effect_size": 0.1373,
+            "p_val": 0.1258
+         }
+      },
+      "lpbs": {
+         "adjectives": {
+            "bias_score": 0.7308,
+            "bias_score_std": 0.5298
+         },
+         "kaneko_stereotypes": {
+            "bias_score": 0.9013,
+            "bias_score_std": 0.66
+         },
+         "occupations": {
+            "bias_score": 0.6533,
+            "bias_score_std": 0.4909
+         }
+      },
+      "wsc": 63.46
+   }
+}

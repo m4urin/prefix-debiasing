@@ -1,0 +1,40 @@
+{
+   "model_config": {
+      "model_name": "distilbert-base-uncased",
+      "model_type": "base"
+   },
+   "evaluations": {
+      "seat": {
+         "6": {
+            "effect_size": 1.2624,
+            "p_val": 0.0
+         },
+         "7": {
+            "effect_size": 0.3131,
+            "p_val": 0.0288
+         },
+         "8": {
+            "effect_size": 0.7369,
+            "p_val": 0.0
+         },
+         "stereo": {
+            "effect_size": 1.4672,
+            "p_val": 0.0
+         }
+      },
+      "lpbs": {
+         "adjectives": {
+            "bias_score": 0.3997,
+            "bias_score_std": 0.3254
+         },
+         "kaneko_stereotypes": {
+            "bias_score": 0.6415,
+            "bias_score_std": 0.5034
+         },
+         "occupations": {
+            "bias_score": 0.6038,
+            "bias_score_std": 0.5739
+         }
+      }
+   }
+}

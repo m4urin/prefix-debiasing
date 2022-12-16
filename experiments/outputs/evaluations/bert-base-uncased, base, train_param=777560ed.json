@@ -1,0 +1,40 @@
+{
+   "model_config": {
+      "model_name": "bert-base-uncased",
+      "model_type": "base"
+   },
+   "evaluations": {
+      "seat": {
+         "6": {
+            "effect_size": 1.0436,
+            "p_val": 0.0
+         },
+         "7": {
+            "effect_size": 0.1761,
+            "p_val": 0.1459
+         },
+         "8": {
+            "effect_size": 0.8134,
+            "p_val": 0.0
+         },
+         "stereo": {
+            "effect_size": 1.6653,
+            "p_val": 0.0
+         }
+      },
+      "lpbs": {
+         "adjectives": {
+            "bias_score": 0.5393,
+            "bias_score_std": 0.4782
+         },
+         "kaneko_stereotypes": {
+            "bias_score": 0.7563,
+            "bias_score_std": 0.6229
+         },
+         "occupations": {
+            "bias_score": 0.9575,
+            "bias_score_std": 0.9198
+         }
+      }
+   }
+}

@@ -1,0 +1,53 @@
+{
+   "model_config": {
+      "model_name": "roberta-base",
+      "model_type": "base",
+      "downstream_task": "probe",
+      "head_size": 1,
+      "epochs": 1,
+      "batch_size": 32,
+      "lr": 2e-05,
+      "num_warmup_steps": 40,
+      "seed": 42
+   },
+   "evaluations": {
+      "seat": {
+         "6": {
+            "effect_size": -0.0921,
+            "p_val": 0.6925
+         },
+         "7": {
+            "effect_size": 0.1791,
+            "p_val": 0.1419
+         },
+         "8": {
+            "effect_size": 0.1695,
+            "p_val": 0.1881
+         },
+         "stereo": {
+            "effect_size": 0.1596,
+            "p_val": 0.0937
+         }
+      },
+      "lpbs": {
+         "adjectives": {
+            "bias_score": 3.3274,
+            "bias_score_std": 2.6552
+         },
+         "kaneko_stereotypes": {
+            "bias_score": 2.6033,
+            "bias_score_std": 1.978
+         },
+         "occupations": {
+            "bias_score": 4.3443,
+            "bias_score_std": 2.7709
+         }
+      },
+      "probe": {
+         "gender_acc": 99.73,
+         "stereotype_acc": 77.0,
+         "stereotype_conf": 0.4193,
+         "p_value": 0.0
+      }
+   }
+}

@@ -1,0 +1,49 @@
+{
+   "model_config": {
+      "model_name": "distilbert-base-uncased",
+      "model_type": "prefix",
+      "debias_method": "kaneko",
+      "prefix_mode": "linear",
+      "prefix_layers": "all",
+      "n_prefix_tokens": 8,
+      "epochs": 3,
+      "batch_size": 32,
+      "lr": 0.0005,
+      "num_warmup_steps": 100,
+      "seed": 42
+   },
+   "evaluations": {
+      "seat": {
+         "6": {
+            "effect_size": -0.0649,
+            "p_val": 0.6425
+         },
+         "7": {
+            "effect_size": 0.0785,
+            "p_val": 0.3192
+         },
+         "8": {
+            "effect_size": 0.0213,
+            "p_val": 0.4561
+         },
+         "stereo": {
+            "effect_size": -0.1425,
+            "p_val": 0.8828
+         }
+      },
+      "lpbs": {
+         "adjectives": {
+            "bias_score": 1.1097,
+            "bias_score_std": 0.7886
+         },
+         "kaneko_stereotypes": {
+            "bias_score": 1.2938,
+            "bias_score_std": 0.8481
+         },
+         "occupations": {
+            "bias_score": 1.0761,
+            "bias_score_std": 0.824
+         }
+      }
+   }
+}

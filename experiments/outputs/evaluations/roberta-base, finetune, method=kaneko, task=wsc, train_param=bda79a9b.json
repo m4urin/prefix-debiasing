@@ -1,0 +1,49 @@
+{
+   "model_config": {
+      "model_name": "roberta-base",
+      "model_type": "finetune",
+      "debias_method": "kaneko",
+      "downstream_task": "wsc",
+      "head_size": 3,
+      "epochs": 20,
+      "batch_size": 24,
+      "lr": 2e-06,
+      "num_warmup_steps": 40,
+      "seed": 42
+   },
+   "evaluations": {
+      "seat": {
+         "6": {
+            "effect_size": 0.1646,
+            "p_val": 0.1781
+         },
+         "7": {
+            "effect_size": -0.0564,
+            "p_val": 0.6317
+         },
+         "8": {
+            "effect_size": 0.1117,
+            "p_val": 0.2783
+         },
+         "stereo": {
+            "effect_size": -0.1541,
+            "p_val": 0.9008
+         }
+      },
+      "lpbs": {
+         "adjectives": {
+            "bias_score": 0.6856,
+            "bias_score_std": 0.5113
+         },
+         "kaneko_stereotypes": {
+            "bias_score": 0.5425,
+            "bias_score_std": 0.4003
+         },
+         "occupations": {
+            "bias_score": 0.6284,
+            "bias_score_std": 0.4779
+         }
+      },
+      "wsc": 63.46
+   }
+}

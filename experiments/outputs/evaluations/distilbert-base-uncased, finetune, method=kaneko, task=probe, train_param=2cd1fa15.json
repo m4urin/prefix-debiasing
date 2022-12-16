@@ -1,0 +1,54 @@
+{
+   "model_config": {
+      "model_name": "distilbert-base-uncased",
+      "model_type": "finetune",
+      "debias_method": "kaneko",
+      "downstream_task": "probe",
+      "head_size": 1,
+      "epochs": 1,
+      "batch_size": 32,
+      "lr": 2e-05,
+      "num_warmup_steps": 40,
+      "seed": 42
+   },
+   "evaluations": {
+      "seat": {
+         "6": {
+            "effect_size": 1.1127,
+            "p_val": 0.0
+         },
+         "7": {
+            "effect_size": -0.145,
+            "p_val": 0.8041
+         },
+         "8": {
+            "effect_size": -0.0912,
+            "p_val": 0.685
+         },
+         "stereo": {
+            "effect_size": 0.7796,
+            "p_val": 0.0
+         }
+      },
+      "lpbs": {
+         "adjectives": {
+            "bias_score": 0.6339,
+            "bias_score_std": 0.5033
+         },
+         "kaneko_stereotypes": {
+            "bias_score": 0.8733,
+            "bias_score_std": 0.689
+         },
+         "occupations": {
+            "bias_score": 1.0204,
+            "bias_score_std": 0.9103
+         }
+      },
+      "probe": {
+         "gender_acc": 99.35,
+         "stereotype_acc": 60.64,
+         "stereotype_conf": 0.4005,
+         "p_value": 0.0
+      }
+   }
+}
