@@ -5,6 +5,8 @@ experiments/outputs/trained_models
 src/test/
 *.parquet
 *.pt
+*.png
+*.jpg
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
