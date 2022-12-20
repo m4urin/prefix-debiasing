@@ -57,8 +57,7 @@ class MLHeadTrainer(Trainer):
 
         progress_bar = tqdm(total=total_steps)
         model.train()
-        for iteration, batch in enumerate(DataLoader(dataset.shuffle(seed=config.seed),
-                                                     batch_size=BATCH_SIZE)):
+        for iteration, batch in enumerate(DataLoader(dataset.shuffle(seed=42), batch_size=BATCH_SIZE)):
             optimizer.zero_grad()
             # RUN MODELS
             enc = model.tokenize(batch['sentence'])
@@ -471,6 +470,6 @@ def train_model(model: LanguageModel):
     elif model.config.is_debiased():
         result = TRAIN_REGISTER[model.config.debias_method].train(model)
     else:
-        return TrainResult(model.config).finish_training(time(), model)
+        result = TrainResult(model.config).finish_training(time(), model)
     TRAIN_REGISTER['ml_head'].train(model)
     return result

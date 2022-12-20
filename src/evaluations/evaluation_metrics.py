@@ -180,14 +180,6 @@ class GLUETest(Metric):
         super().__init__(metric_name=metric_name, folder_name='glue')
 
     def prepare_data(self, folder: IOFolder):
-        """ Dataset:
-                    'sentence1': str,
-                    'sentence2': str,
-                    'label': float,
-                    ('use_someone': int,
-                    'pronoun_class': int,
-                    'subject_is_occupation': int)
-                """
         return folder.read_file(f'validation/{self.metric_name}.parquet')
 
     def process_batch(self, model: LanguageModel, batch):
@@ -214,12 +206,12 @@ class GLUETest(Metric):
         with torch.no_grad():
             model.eval()
             logits = []
-            for batch in tqdm(DataLoader(self.data, batch_size=32)):
+            for batch in tqdm(DataLoader(self.data, batch_size=32), desc=self.metric_name):
                 # (bs, 1)
                 logits.append(self.process_batch(model, batch))
             # (n, 1)
             logits = torch.cat(logits, dim=0)
-            labels = torch.tensor(self.data['label'], dtype=torch.float32, device=logits.device)
+            labels = torch.tensor(self.data['label'], dtype=torch.float32, device=logits.device).unsqueeze(-1)
             score = 1.0 - torch.abs(labels - (logits > 0).float()).mean().item()
             return round(100 * score, 2)
 
@@ -260,6 +252,10 @@ class WinoGender(Metric):
         with torch.no_grad():
             model = model.eval_modus()
             dataset = self.get_subset_data(self.data, use_someone=0)
+
+            enc = model.tokenize_with_spans(fix_string_batch(batch['sentence']))
+            subject_idx = batch['subject_idx']
+
             all_preds = (model.coref(dataset['sentence'], dataset['subject_idx']) > 0).int()
             all_trues = torch.tensor(dataset['label'], dtype=torch.float32, device=all_preds.device)
             result = {'all': {
@@ -360,5 +356,8 @@ def run_metrics(model: LanguageModel) -> dict:
             metrics += [ProbeTest()]
         else:
             metrics += [GLUETest(model.config.downstream_task)]
+
+        if model.config.downstream_task == 'wsc':
+            metrics += [WinoGender()]
 
     return {m.metric_name: m.eval_model(model) for m in metrics}

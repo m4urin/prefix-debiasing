@@ -7,16 +7,74 @@ def aggregate_f(col_data):
     return s
 
 
+def debias_results(name):
+    df = read_file(f'experiments/outputs/results/{name}.csv')
+    df = df[df['downstream_task'].isnull()]
+    df = df.sort_values(by=['model_name', 'model_type']).reset_index(drop=True)
+    # df = df.dropna(axis=1, how='all')  # remove columns if all is NaN
+    df = df.dropna(axis=1)  # remove columns if any is NaN
+
+    def f(x):
+        x = str(round(x, 2))
+        if len(x.split('.')[-1]) == 1:
+            x += '0'
+        return x
+    cols = ['model_name', 'model_type', 'training_time (minutes)', 'n_parameters']
+    for i in range(6, 9):
+        e, p, c = f'seat {i} effect_size', f'seat {i} p_val', f'SEAT-{i}'
+        df[e] = df[e].apply(f)
+        df[p] = df[p].apply(f)
+        df[c] = df[[e, p]].agg(' ± '.join, axis=1)
+        cols.append(c)
+    for i, c in [('adjectives', 'adj.'), ('occupations', 'occ.'), ('kaneko_stereotypes', 'stereo')]:
+        e, p, c = f'lpbs {i} bias_score', f'lpbs {i} bias_score_std', f'LPBS {c}'
+        df[e] = df[e].apply(f)
+        df[p] = df[p].apply(f)
+        df[c] = df[[e, p]].agg(' ± '.join, axis=1)
+        cols.append(c)
+    df = df[cols]
+    print(df.to_string())
+    write_file(f'experiments/outputs/results/{name}_debias.csv', df)
+
+
+def downstream_results(name):
+    df = read_file(f'experiments/outputs/results/{name}.csv')
+    df['downstream_task'] = df['downstream_task'].apply(lambda x: 'glue' if x in {'sst2', 'mrpc', 'rte', 'wsc'} else 'other')
+    df = df[df['downstream_task'] == 'glue']
+
+    # df = df.dropna(axis=1, how='all')  # remove columns if all is NaN
+    #df = df.dropna(axis=1)  # remove columns if any is NaN
+    df = df[['model_name', 'model_type', 'debias_method', 'training_time (minutes)',
+             'sst2', 'mrpc', 'rte', 'wsc']]
+    df['debias_method'] = df['debias_method'].fillna('')
+
+    df = df.groupby(by=['model_name', 'model_type', 'debias_method']).agg(aggregate_f).reset_index()
+
+    df = df.sort_values(by=['model_name', 'model_type', 'debias_method']).reset_index(drop=True)
+    df = df[['model_name', 'model_type', 'training_time (minutes)',
+             'sst2', 'mrpc', 'rte', 'wsc']]
+    df['training_time (minutes)'] = df['training_time (minutes)'].apply(lambda x: round(x, 1))
+    print(df.to_string())
+    print()
+    write_file(f'experiments/outputs/results/{name}_downstream.csv', df)
+
+
 name = '4_model_test'
-df = read_file(f'experiments/outputs/results/{name}.csv')
-df['downstream_task'] = df['downstream_task'].fillna('')
-df['downstream_task'] = df['downstream_task'].apply(lambda x: 'glue' if x in {'sst2', 'mrpc', 'rte', 'wsc'} else x)
-df = df.groupby(['model_name', 'model_type', 'downstream_task']).agg(aggregate_f).reset_index()
-df = df.sort_values(by=['downstream_task', 'model_type', 'model_name'])
+debias_results(name)
+downstream_results(name)
 
+#df['downstream_task'] = df['downstream_task'].fillna('')
+#df['debias_method'] = df['debias_method'].fillna('')
 
+#df = df[df['downstream_task'] == '']
+#df = df.sort_values(by=['model_name', 'model_type']).reset_index(drop=True)
+#df = df.dropna(axis=1, how='all')  # remove columns if all is NaN
+#df = df.dropna(axis=1)  # remove columns if any is NaN
+#df = df[['model_name', 'model_type']]
 
+#df['downstream_task'] = df['downstream_task'].apply(lambda x: 'glue' if x in {'sst2', 'mrpc', 'rte', 'wsc'} else x)
+#df = df.groupby(['model_name', 'debias_method', 'model_type', 'downstream_task']).agg(aggregate_f).reset_index()
+#df = df.sort_values(by=['debias_method', 'downstream_task', 'model_type', 'model_name']).reset_index()
 
+#write_file(f'experiments/outputs/results/{name}_aggr.csv', df)
 
-write_file(f'experiments/outputs/results/{name}_aggr.csv', df)
-print(df.to_string())

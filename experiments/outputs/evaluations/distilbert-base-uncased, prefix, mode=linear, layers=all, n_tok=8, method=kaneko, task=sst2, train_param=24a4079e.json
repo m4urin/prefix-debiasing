@@ -17,36 +17,36 @@
    "evaluations": {
       "seat": {
          "6": {
-            "effect_size": -0.0192,
-            "p_val": 0.5422
+            "effect_size": 0.4752,
+            "p_val": 0.0035
          },
          "7": {
-            "effect_size": -0.0384,
-            "p_val": 0.5866
+            "effect_size": -0.1005,
+            "p_val": 0.7245
          },
          "8": {
-            "effect_size": -0.2128,
-            "p_val": 0.8682
+            "effect_size": -0.0332,
+            "p_val": 0.5705
          },
          "stereo": {
-            "effect_size": 0.5681,
-            "p_val": 0.0
+            "effect_size": 0.3635,
+            "p_val": 0.0015
          }
       },
       "lpbs": {
          "adjectives": {
-            "bias_score": 0.8736,
-            "bias_score_std": 0.7178
+            "bias_score": 0.8174,
+            "bias_score_std": 0.6107
          },
          "kaneko_stereotypes": {
-            "bias_score": 1.0705,
-            "bias_score_std": 0.8146
+            "bias_score": 0.8428,
+            "bias_score_std": 0.6507
          },
          "occupations": {
-            "bias_score": 1.0414,
-            "bias_score_std": 0.76
+            "bias_score": 0.9898,
+            "bias_score_std": 0.8359
          }
       },
-      "sst2": 50.19
+      "sst2": 76.15
    }
 }
