@@ -215,7 +215,7 @@ class GLUETest(Metric):
             score = 1.0 - torch.abs(labels - (logits > 0).float()).mean().item()
             return round(100 * score, 2)
 
-
+"""
 class WinoGender(Metric):
     def __init__(self):
         super().__init__(metric_name='winogender', folder_name='winogender')
@@ -244,11 +244,11 @@ class WinoGender(Metric):
                                         x['subject_is_occupation'] in subject_is_occupation)
 
     def eval_model(self, model: LanguageModel):
-        """ Dataset:
+         Dataset:
             'sentence': str,
             'subject_idx': subject_index // 2,
             'label': float
-        """
+        
         with torch.no_grad():
             model = model.eval_modus()
             dataset = self.get_subset_data(self.data, use_someone=0)
@@ -278,7 +278,7 @@ class WinoGender(Metric):
                     }
 
             return result
-
+"""
 
 class ProbeTest(Metric):
     def __init__(self):
@@ -350,14 +350,14 @@ class QualityTest(Metric):
 
 
 def run_metrics(model: LanguageModel) -> dict:
-    metrics = [SEAT(), LPBS()]
+    metrics = [] # [SEAT(), LPBS()] TODO
     if model.config.is_downstream():
         if model.config.downstream_task == 'probe':
             metrics += [ProbeTest()]
         else:
             metrics += [GLUETest(model.config.downstream_task)]
 
-        if model.config.downstream_task == 'wsc':
-            metrics += [WinoGender()]
+        #if model.config.downstream_task == 'wsc':
+        #    metrics += [WinoGender()]
 
     return {m.metric_name: m.eval_model(model) for m in metrics}

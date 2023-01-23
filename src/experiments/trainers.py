@@ -8,12 +8,12 @@ from tqdm import tqdm
 
 import torch
 from diffusers import get_linear_schedule_with_warmup
-from torch.optim import AdamW
+from torch.optim import AdamW, SGD
 
 from src.data.structs.results import TrainResult
 from src.language_models.language_model import LanguageModel
 from src.data.preprocess_data import get_kaneko_data, get_ml_head_data, get_probe_data
-from src.utils.files import get_folder
+from src.utils.files import get_folder, write_file
 from src.utils.printing import pretty_number
 from src.utils.pytorch import DEVICE, fix_string_batch, freeze, unfreeze
 
@@ -104,11 +104,11 @@ class ProbeTrainer(Trainer):
     def process_batch(self, model: LanguageModel, batch):
         enc = model.tokenize_with_spans(fix_string_batch(batch['sentences']))
         # (n_spans, dim) == (bs, dim)
-        embeddings = model.get_span_embeddings(enc, reduce='mean')
+        embeddings = model.get_span_embeddings(enc, reduce='first')
         return model.cls_head(embeddings), batch['label']
 
     def train(self, model: LanguageModel) -> TrainResult:
-        train_dataset, eval_dataset, _ = get_probe_data()
+        train_dataset, eval_dataset, stereo_dataset = get_probe_data()
         config = model.config
         result = TrainResult(config)
         all_losses = []
@@ -117,38 +117,34 @@ class ProbeTrainer(Trainer):
         last_progress_bar_update = start_time - 10
         current_train_step = 0
 
-        total_train_steps = config.epochs * ceil(len(train_dataset) / config.batch_size)
-        total_test_steps = config.epochs * ceil(len(eval_dataset) / config.batch_size)
-        switch_optim = int(0.15 * total_train_steps)
-
-        freeze(model)
-        optimizer = AdamW(params=unfreeze(model.cls_head).parameters(), lr=config.lr * 10)
-        scheduler = get_linear_schedule_with_warmup(optimizer=optimizer,
-                                                    num_warmup_steps=config.num_warmup_steps,
-                                                    num_training_steps=int(switch_optim * 1.02))
-        criterion = torch.nn.BCEWithLogitsLoss()
+        total_train_steps = ceil(len(train_dataset) / config.batch_size)
+        total_test_steps = ceil(len(eval_dataset) / config.batch_size)
+        total_stereo_steps = ceil(len(stereo_dataset) / config.batch_size)
 
         title = f'Probe: Train head only..'
-        progress_bar = tqdm(total=total_train_steps + total_test_steps)
+        total_steps = total_train_steps + total_test_steps + (11 * total_stereo_steps)
+        total_steps *= config.epochs
+        progress_bar = tqdm(total=total_steps)
+
+        freeze(model)
+        optimizer = AdamW(params=unfreeze(model.cls_head).parameters(), lr=config.lr)
+        scheduler = get_linear_schedule_with_warmup(optimizer=optimizer,
+                                                    num_warmup_steps=config.num_warmup_steps,
+                                                    num_training_steps=total_steps)
+        criterion = torch.nn.BCEWithLogitsLoss()
 
         loss_train = LatestStats(min(5, total_train_steps // (10 * config.epochs)))
         accuracy_train = LatestStats(min(5, total_train_steps // (10 * config.epochs)))
         loss_test = LatestStats(total_test_steps // config.epochs)
         accuracy_test = LatestStats(total_test_steps // config.epochs)
 
+        experiment_results = {'stereotype_loss': [], 'stereotype_acc': []}
+
         for epoch in range(config.epochs):
-            model.train()
+            update_t = (total_train_steps // 20)
             for iteration, x in enumerate(DataLoader(train_dataset.shuffle(seed=config.seed + epoch),
                                                      batch_size=config.batch_size)):
-                if current_train_step == switch_optim:
-                    title = f'Probe: Train complete model..'
-                    freeze(model)
-                    optimizer = AdamW(params=unfreeze(model.get_parameters_to_train()), lr=config.lr)
-                    scheduler = get_linear_schedule_with_warmup(optimizer=optimizer,
-                                                                num_warmup_steps=config.num_warmup_steps,
-                                                                num_training_steps=int((total_train_steps -
-                                                                                        switch_optim) * 1.04))
-
+                model.train()
                 optimizer.zero_grad()
                 model.zero_grad()
                 logits, labels = self.process_batch(model, x)
@@ -158,8 +154,9 @@ class ProbeTrainer(Trainer):
                 optimizer.step()
                 scheduler.step()
                 loss = loss.item()
+                acc = torch.abs((logits <= 0).float() - labels).sum().item()
 
-                accuracy_train.add(torch.abs((logits <= 0).float() - labels).sum().item(), len(labels))
+                accuracy_train.add(acc, len(labels))
                 loss_train.add(loss, len(labels))
                 result.add_scalar(f'loss/train', loss)
                 all_losses.append(loss)
@@ -176,6 +173,33 @@ class ProbeTrainer(Trainer):
 
                 progress_bar.update()
                 current_train_step += 1
+
+                if iteration % update_t == 0:
+                    with torch.no_grad():
+                        model.eval()
+                        total_stereo_loss = 0
+                        total_stereo_correct = 0
+                        for iteration, x in enumerate(DataLoader(stereo_dataset, batch_size=config.batch_size)):
+                            logits, labels = self.process_batch(model, x)
+                            labels = labels.unsqueeze(-1).to(device=DEVICE, dtype=torch.float32).detach()
+                            total_stereo_loss += criterion(logits, labels).item()
+                            total_stereo_correct += torch.abs((logits <= 0).float() - labels).sum().item()
+                            progress_bar.update()
+                        experiment_results['stereotype_loss'].append(total_stereo_loss)
+                        experiment_results['stereotype_acc'].append(total_stereo_correct / len(stereo_dataset))
+
+            with torch.no_grad():
+                model.eval()
+                total_stereo_loss = 0
+                total_stereo_correct = 0
+                for iteration, x in enumerate(DataLoader(stereo_dataset, batch_size=config.batch_size)):
+                    logits, labels = self.process_batch(model, x)
+                    labels = labels.unsqueeze(-1).to(device=DEVICE, dtype=torch.float32).detach()
+                    total_stereo_loss += criterion(logits, labels).item()
+                    total_stereo_correct += torch.abs((logits <= 0).float() - labels).sum().item()
+                    progress_bar.update()
+                experiment_results['stereotype_loss'].append(total_stereo_loss)
+                experiment_results['stereotype_acc'].append(total_stereo_correct / len(stereo_dataset))
 
             with torch.no_grad():
                 last_progress_bar_update = time() - 10
@@ -199,6 +223,8 @@ class ProbeTrainer(Trainer):
                                  f"test_acc={round(100 * accuracy_test.get_score(), 2)}")
                         last_progress_bar_update = time()
                     progress_bar.update()
+
+        write_file(f'experiments/outputs/results/gender_probe/{config.get_filename()}.json', experiment_results)
         save_img('ProbeTraining', all_losses, 100, config)
         return result.finish_training(start_time, model)
 
@@ -471,5 +497,5 @@ def train_model(model: LanguageModel):
         result = TRAIN_REGISTER[model.config.debias_method].train(model)
     else:
         result = TrainResult(model.config).finish_training(time(), model)
-    TRAIN_REGISTER['ml_head'].train(model)
+    #TRAIN_REGISTER['ml_head'].train(model) TODO
     return result

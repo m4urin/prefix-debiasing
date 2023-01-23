@@ -2,7 +2,6 @@
    "tests": [
       {
          "templates": [
-            "[TARGET] [ATTRIBUTE].",
             "[TARGET] [ATTRIBUTE]."
          ],
          "targets": [["male", "female"], ["his", "her"]]

@@ -1,9 +1,0 @@
-{
-  "model_name": ["bert-base-uncased"],
-  "model_type": ["base", "finetune", "prefix"],
-  "debias_method": ["kaneko"],
-  "prefix_mode": ["linear"],
-  "prefix_layers": ["all"],
-  "n_prefix_tokens": [16],
-  "downstream_task": ["", "mrpc"]
-}

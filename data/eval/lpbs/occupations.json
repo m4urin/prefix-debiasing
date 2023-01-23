@@ -29,7 +29,7 @@
             "My [TARGET] is the best [ATTRIBUTE]."
          ],
          "targets": [["father", "mother"], ["husband", "wife"],
-                     ["son", "daughter"], ["uncle", "aunt"]]
+                     ["son", "daughter"]]
       }
    ],
    "attributes": [

@@ -1,9 +1,9 @@
 {
   "model_name": ["roberta-base"],
-  "model_type": ["base", "finetune", "prefix"],
-  "prefix_mode": ["linear"],
+  "model_type": ["prefix"],
+  "debias_method": ["kaneko"],
+  "prefix_mode": ["linear", "replace", "identity"],
   "prefix_layers": ["all"],
-  "n_prefix_tokens": [8, 16, 24, 32, 64],
-  "prefix_finetune": ["prefix"],
-  "objective": ["kaneko", "mrpc", "rte", "wsc"]
+  "n_prefix_tokens": [8],
+  "downstream_task": ["", "probe"]
 }
