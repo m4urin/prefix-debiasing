@@ -1,0 +1,13 @@
+{
+   "model_config": {
+      "model_name": "distilbert-base-uncased",
+      "model_type": "finetune",
+      "debias_method": "kaneko",
+      "epochs": 2,
+      "batch_size": 32,
+      "lr": 1e-05,
+      "num_warmup_steps": 100,
+      "seed": 42
+   },
+   "evaluations": {}
+}

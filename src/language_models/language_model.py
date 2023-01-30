@@ -42,10 +42,12 @@ class LanguageModel(nn.Module):
     def add_cls_head(self, config: ModelConfig):
         self.config = config
         self.cls_head = nn.Sequential(OrderedDict({
-            'dense': nn.Linear(self.dim * self.config.head_size, self.dim),
-            'layer_norm': nn.LayerNorm(self.dim, eps=1e-05, elementwise_affine=True),
-            'decoder': nn.Linear(self.dim, 1)
+            'dense': nn.Linear(self.dim * self.config.head_size, self.dim // 2),
+            'activation': nn.ReLU(),
+            'decoder': nn.Linear(self.dim // 2, 2)
         }))
+        #self.cls_head = nn.Linear(self.dim * self.config.head_size, 2)
+        print('added new!')
 
     def get_parameters_to_train(self) -> List[nn.Parameter]:
         raise NotImplementedError('Not implemented yet.')

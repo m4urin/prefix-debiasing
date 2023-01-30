@@ -82,7 +82,7 @@ class Experiment:
                                     'training_time (minutes)': round(train_time / 60, 1),
                                     'n_parameters': n_parameters,
                                     **evaluations})
-        df = dataframe_from_dicts(all_evaluations).fillna('').sort_values(by=['model_name', 'debias_method', 'model_type', 'n_prefix_tokens'])
+        df = dataframe_from_dicts(all_evaluations).fillna('').sort_values(by=['model_name', 'debias_method', 'model_type']) # , 'n_prefix_tokens'
         self.output_result.write_file(f'{self.name}.csv', df)
         print(df.to_string(), '\n')
         return self

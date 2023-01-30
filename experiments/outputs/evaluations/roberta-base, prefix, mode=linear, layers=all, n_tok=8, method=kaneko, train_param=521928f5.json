@@ -1,0 +1,16 @@
+{
+   "model_config": {
+      "model_name": "roberta-base",
+      "model_type": "prefix",
+      "debias_method": "kaneko",
+      "prefix_mode": "linear",
+      "prefix_layers": "all",
+      "n_prefix_tokens": 8,
+      "epochs": 2,
+      "batch_size": 32,
+      "lr": 0.0003,
+      "num_warmup_steps": 100,
+      "seed": 42
+   },
+   "evaluations": {}
+}

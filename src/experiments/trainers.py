@@ -8,7 +8,7 @@ from tqdm import tqdm
 
 import torch
 from diffusers import get_linear_schedule_with_warmup
-from torch.optim import AdamW, SGD
+from torch.optim import AdamW, SGD, Adam
 
 from src.data.structs.results import TrainResult
 from src.language_models.language_model import LanguageModel
@@ -121,40 +121,58 @@ class ProbeTrainer(Trainer):
         total_test_steps = ceil(len(eval_dataset) / config.batch_size)
         total_stereo_steps = ceil(len(stereo_dataset) / config.batch_size)
 
+        n_stereo_intervals = 10
+        update_t = total_train_steps // n_stereo_intervals
         title = f'Probe: Train head only..'
-        total_steps = total_train_steps + total_test_steps + (11 * total_stereo_steps)
+        total_steps = total_train_steps + total_test_steps + (total_stereo_steps // n_stereo_intervals)
         total_steps *= config.epochs
         progress_bar = tqdm(total=total_steps)
 
-        freeze(model)
-        optimizer = AdamW(params=unfreeze(model.cls_head).parameters(), lr=config.lr)
+        for p in model.parameters():
+            p.requires_grad = False
+
+        for p in model.cls_head.parameters():
+            p.requires_grad = True
+
+        optimizer = AdamW(params=model.parameters(), lr=config.lr, weight_decay=1e-8)
+
         scheduler = get_linear_schedule_with_warmup(optimizer=optimizer,
                                                     num_warmup_steps=config.num_warmup_steps,
-                                                    num_training_steps=total_steps)
-        criterion = torch.nn.BCEWithLogitsLoss()
+                                                    num_training_steps=total_train_steps * config.epochs * 1.2)
+        criterion = torch.nn.CrossEntropyLoss()
 
-        loss_train = LatestStats(min(5, total_train_steps // (10 * config.epochs)))
-        accuracy_train = LatestStats(min(5, total_train_steps // (10 * config.epochs)))
-        loss_test = LatestStats(total_test_steps // config.epochs)
-        accuracy_test = LatestStats(total_test_steps // config.epochs)
+        loss_train = LatestStats(20)
+        accuracy_train = LatestStats(20)
 
-        experiment_results = {'stereotype_loss': [], 'stereotype_acc': []}
+        experiment_results = {'stereotype_loss': [], 'stereotype_acc': [], 'test_acc': [], 'conf': []}
+
+        best_stereo_acc = -1
+        test_acc = -1
 
         for epoch in range(config.epochs):
-            update_t = (total_train_steps // 20)
             for iteration, x in enumerate(DataLoader(train_dataset.shuffle(seed=config.seed + epoch),
                                                      batch_size=config.batch_size)):
-                model.train()
-                optimizer.zero_grad()
-                model.zero_grad()
+                model.eval()
                 logits, labels = self.process_batch(model, x)
-                labels = labels.unsqueeze(-1).to(device=DEVICE, dtype=torch.float32)
-                loss = criterion(logits, labels)
+                target = torch.zeros_like(logits, device=logits.device, dtype=torch.float32)
+                target[range(len(target)), labels] = 1
+                pred = torch.softmax(logits, dim=-1)
+
+                #if iteration % 20 == 0:
+                    #print(fix_string_batch(x['sentences'])[:2])
+                    #print(torch.cat((target[:4], pred[:4]), dim=-1))
+
+                #assert iteration < 50
+
+                loss = criterion(pred, target)
+                optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
                 scheduler.step()
                 loss = loss.item()
-                acc = torch.abs((logits <= 0).float() - labels).sum().item()
+                #acc = torch.abs((logits <= 0).float() - labels).sum().item()
+                acc = torch.abs(pred.argmin(dim=-1).cpu() - labels).sum().item()
+                #print(pred.argmin(dim=-1).size())
 
                 accuracy_train.add(acc, len(labels))
                 loss_train.add(loss, len(labels))
@@ -167,26 +185,32 @@ class ProbeTrainer(Trainer):
                              f"epoch {epoch + 1}/{config.epochs}, "
                              f"train_loss={pretty_number(loss_train.get_score(), 2)}, "
                              f"train_acc={round(100 * accuracy_train.get_score(), 2)}, "
-                             f"test_loss={pretty_number(loss_test.get_score(), 2)}, "
-                             f"test_acc={round(100 * accuracy_test.get_score(), 2)}")
+                             f"test_acc={round(100 * test_acc, 2)}, "
+                             f"stereo_acc={round(100 * best_stereo_acc, 2)}")
                     last_progress_bar_update = time()
 
                 progress_bar.update()
                 current_train_step += 1
 
-                if iteration % update_t == 0:
+                if iteration > 0 and iteration % update_t == 0:
                     with torch.no_grad():
                         model.eval()
                         total_stereo_loss = 0
                         total_stereo_correct = 0
+                        conf = 0
                         for iteration, x in enumerate(DataLoader(stereo_dataset, batch_size=config.batch_size)):
                             logits, labels = self.process_batch(model, x)
-                            labels = labels.unsqueeze(-1).to(device=DEVICE, dtype=torch.float32).detach()
-                            total_stereo_loss += criterion(logits, labels).item()
-                            total_stereo_correct += torch.abs((logits <= 0).float() - labels).sum().item()
-                            progress_bar.update()
+                            target = torch.zeros_like(logits, device=logits.device, dtype=torch.float32)
+                            target[range(len(target)), labels] = 1
+                            pred = torch.softmax(logits, dim=-1)
+                            total_stereo_loss += criterion(pred, target).item()
+                            total_stereo_correct += torch.abs(pred.argmin(dim=-1).cpu() - labels).sum().item()
+                            conf += torch.abs(pred[..., 0] - 0.5).sum().item()
                         experiment_results['stereotype_loss'].append(total_stereo_loss)
-                        experiment_results['stereotype_acc'].append(total_stereo_correct / len(stereo_dataset))
+                        _acc = total_stereo_correct / len(stereo_dataset)
+                        experiment_results['stereotype_acc'].append(_acc)
+                        best_stereo_acc = max(_acc, best_stereo_acc)
+                        experiment_results['conf'].append(conf / len(stereo_dataset))
 
             with torch.no_grad():
                 model.eval()
@@ -194,56 +218,57 @@ class ProbeTrainer(Trainer):
                 total_stereo_correct = 0
                 for iteration, x in enumerate(DataLoader(stereo_dataset, batch_size=config.batch_size)):
                     logits, labels = self.process_batch(model, x)
-                    labels = labels.unsqueeze(-1).to(device=DEVICE, dtype=torch.float32).detach()
-                    total_stereo_loss += criterion(logits, labels).item()
-                    total_stereo_correct += torch.abs((logits <= 0).float() - labels).sum().item()
-                    progress_bar.update()
+                    target = torch.zeros_like(logits, device=logits.device, dtype=torch.float32)
+                    target[range(len(target)), labels] = 1
+                    pred = torch.softmax(logits, dim=-1)
+                    total_stereo_loss += criterion(pred, target).item()
+                    total_stereo_correct += torch.abs(pred.argmin(dim=-1).cpu() - labels).sum().item()
                 experiment_results['stereotype_loss'].append(total_stereo_loss)
                 experiment_results['stereotype_acc'].append(total_stereo_correct / len(stereo_dataset))
 
             with torch.no_grad():
-                last_progress_bar_update = time() - 10
                 model.eval()
+                total_test_correct = 0
                 for iteration, x in enumerate(DataLoader(eval_dataset, batch_size=config.batch_size)):
                     logits, labels = self.process_batch(model, x)
-                    labels = labels.unsqueeze(-1).to(device=DEVICE, dtype=torch.float32).detach()
-                    loss = criterion(logits, labels).item()
-
-                    accuracy_test.add(torch.abs((logits <= 0).float() - labels).sum().item(), len(labels))
-                    loss_test.add(loss, len(labels))
+                    target = torch.zeros_like(logits, device=logits.device, dtype=torch.float32)
+                    target[range(len(target)), labels] = 1
+                    pred = torch.softmax(logits, dim=-1)
+                    loss = criterion(pred, target).item()
+                    n_correct = torch.abs(pred.argmin(dim=-1).cpu() - labels).sum().item()
+                    total_test_correct += n_correct
                     result.add_scalar(f'loss/test', loss)
 
-                    if time() - last_progress_bar_update > 1:
-                        progress_bar.set_description(
-                            desc=f"{title} "
-                                 f"epoch {epoch + 1}/{config.epochs}, "
-                                 f"train_loss={pretty_number(loss_train.get_score(), 2)}, "
-                                 f"train_acc={round(100 * accuracy_train.get_score(), 2)}, "
-                                 f"test_loss={pretty_number(loss_test.get_score(), 2)}, "
-                                 f"test_acc={round(100 * accuracy_test.get_score(), 2)}")
-                        last_progress_bar_update = time()
                     progress_bar.update()
 
-        write_file(f'experiments/outputs/results/gender_probe/{config.get_filename()}.json', experiment_results)
+                _acc = total_test_correct / len(eval_dataset)
+                experiment_results['test_acc'].append(_acc)
+                test_acc = max(test_acc, _acc)
+
+        write_file(f'experiments/outputs/gender_probe/{config.get_filename()}.json', experiment_results)
         save_img('ProbeTraining', all_losses, 100, config)
         return result.finish_training(start_time, model)
-
+"""
+                
+        """
 
 class OrthogonalTrainer(Trainer):
     def train(self, model: LanguageModel) -> TrainResult:
         config = model.config
         result = TrainResult(config)
+        epochs = config.epochs + 2  # TODO remove +2
+        lr = config.lr * 3
 
         dataset_attribute, dataset_stereo, v_a = get_kaneko_data(config.model_name)
 
         start_time = time()
         last_progress_bar_update = start_time - 10
-        total_steps = config.epochs * ceil(len(dataset_attribute) / (config.batch_size // 2))
+        total_steps = epochs * ceil(len(dataset_attribute) / (config.batch_size // 2))
         train_loss = LatestStats(total_steps // 20)
         all_losses = []
 
         freeze(model)
-        optimizer = AdamW(params=unfreeze(model.get_parameters_to_train()), lr=config.lr)
+        optimizer = AdamW(params=unfreeze(model.get_parameters_to_train()), lr=lr)
         scheduler = get_linear_schedule_with_warmup(optimizer=optimizer,
                                                     num_warmup_steps=config.num_warmup_steps,
                                                     num_training_steps=int(total_steps * 1.04))
@@ -252,7 +277,7 @@ class OrthogonalTrainer(Trainer):
         base_model = freeze(LanguageModel.from_config(config.to_original_model()).train()).to(DEVICE)
 
         progress_bar = tqdm(total=total_steps)
-        for epoch in range(config.epochs):
+        for epoch in range(epochs):
             model.train()
             data_loader_attribute = DataLoader(dataset_attribute.shuffle(seed=config.seed + epoch),
                                                batch_size=config.batch_size // 2)
@@ -276,20 +301,22 @@ class OrthogonalTrainer(Trainer):
                 stereo_new_hidden = model.get_span_embeddings(enc_stereo, reduce='first', output_hidden_states=True)
 
                 # CALCULATE LOSS
-                embedding_regularization_loss = [((a1[:n] - a2[:n]) ** 2).mean() for a1, a2, n
-                                                 in zip(attr_old_hidden, attr_new_hidden, attr_lengths)]
-                embedding_regularization_loss = 0.8 * torch.stack(embedding_regularization_loss).mean()
+                #embedding_regularization_loss = [((a1[:n] - a2[:n]) ** 2).sum() for a1, a2, n
+                #                                 in zip(attr_old_hidden, attr_new_hidden, attr_lengths)]
+                embedding_regularization_loss = 0.8 * ((attr_old_hidden - attr_new_hidden) ** 2).mean()
+                #embedding_regularization_loss = 0.8 * torch.stack(embedding_regularization_loss).mean()
                 result.add_scalar(f'loss/embedding_regularization', embedding_regularization_loss.item())
 
                 prefix_regularization = 0
                 if model.config.is_prefix():
-                    prefix_regularization = 0.1 * model.prefix_embeddings.regularization()
+                    prefix_regularization = 0.01 * model.prefix_embeddings.regularization()
                     result.add_scalar(f'loss/prefix_regularization', prefix_regularization.item())
 
                 # (bs/2, n_layers, dim)
                 #print(v_a.size())
                 #print(stereo_new_hidden.size())
-                orthogonal_loss = 0.1 * (torch.einsum('ald,tld->atl', v_a, stereo_new_hidden) ** 2).mean()
+                #orthogonal_loss = 0.1 * (torch.einsum('ald,tld->atl', v_a, stereo_new_hidden) ** 2).mean()
+                orthogonal_loss = 0.2 * (torch.einsum('ald,tld->atl', v_a, stereo_new_hidden).mean(dim=(1, 2)) ** 2).sum()
                 result.add_scalar(f'loss/orthogonal', orthogonal_loss.item())
 
                 loss = embedding_regularization_loss + orthogonal_loss + prefix_regularization
@@ -304,7 +331,7 @@ class OrthogonalTrainer(Trainer):
                 if time() - last_progress_bar_update > 1:
                     progress_bar.set_description(
                         desc=f"Orthogonal training: "
-                             f"epoch {epoch + 1}/{config.epochs}, "
+                             f"epoch {epoch + 1}/{epochs}, "
                              f"loss={pretty_number(train_loss.get_score(), 2)}")
                     last_progress_bar_update = time()
 

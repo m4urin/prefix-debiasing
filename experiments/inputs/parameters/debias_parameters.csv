@@ -1,4 +1,4 @@
 debias_method,model_type,epochs,lr,batch_size,num_warmup_steps
 kaneko,base,0,0.0,0,0
-kaneko,finetune,3,0.00002,32,100
-kaneko,prefix,3,0.0005,32,100
+kaneko,finetune,2,0.00001,32,100
+kaneko,prefix,2,0.0003,32,100

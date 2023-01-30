@@ -296,11 +296,15 @@ class ProbeTest(Metric):
             # (bs, 1)
             logits.append(model.cls_head(embeddings))
             progress_bar.update()
-        # (n_samples, 1)
+        # (n_samples, 2)
         logits = torch.cat(logits, dim=0)
-        conf = round(torch.abs(logits.sigmoid() - 0.5).mean().item(), 4)
-        pred = (logits > 0).float()
-        labels = torch.tensor(data['label'], dtype=torch.float32, device=pred.device).unsqueeze(-1)
+
+        # (n_samples, 1)
+        pred = logits.softmax(dim=-1)[..., 1]
+        conf = round(torch.abs(pred - 0.5).mean().item(), 4)
+
+        # (n_samples, 1)
+        labels = torch.tensor(data['label'], dtype=torch.float32, device=pred.device)
         correct = 1.0 - torch.abs(labels - pred)
         acc = round(100 * correct.mean().item(), 2)
         return correct, acc, conf
@@ -308,12 +312,13 @@ class ProbeTest(Metric):
     def eval_model(self, model: LanguageModel):
         batch_size = 32
         with torch.no_grad():
-            progress_bar = tqdm(desc='Intrinsic probe',
+            progress_bar = tqdm(desc='Probe',
                                 total=sum(ceil(len(d) / batch_size) for d in self.data.values()))
 
             eval_correct, eval_acc, eval_conf = self.get_result(model, self.data['eval'], progress_bar, batch_size)
             st_correct, st_acc, st_conf = self.get_result(model, self.data['stereotypes'], progress_bar, batch_size)
             progress_bar.close()
+
             p_value = round(permutation_test(eval_correct, st_correct).item(), 5)
             return {
                 'gender_acc': eval_acc,
@@ -353,7 +358,8 @@ def run_metrics(model: LanguageModel) -> dict:
     metrics = [] # [SEAT(), LPBS()] TODO
     if model.config.is_downstream():
         if model.config.downstream_task == 'probe':
-            metrics += [ProbeTest()]
+            pass
+            #metrics += [ProbeTest()]
         else:
             metrics += [GLUETest(model.config.downstream_task)]
 

@@ -3,38 +3,5 @@
       "model_name": "bert-base-uncased",
       "model_type": "base"
    },
-   "evaluations": {
-      "seat": {
-         "6": {
-            "effect_size": 0.7173,
-            "p_val": 0.0
-         },
-         "7": {
-            "effect_size": 0.0604,
-            "p_val": 0.3578
-         },
-         "8": {
-            "effect_size": 0.1866,
-            "p_val": 0.1627
-         },
-         "stereo": {
-            "effect_size": 1.1714,
-            "p_val": 0.0
-         }
-      },
-      "lpbs": {
-         "adjectives": {
-            "bias_score": 0.5581,
-            "bias_score_std": 0.4871
-         },
-         "kaneko_stereotypes": {
-            "bias_score": 1.0404,
-            "bias_score_std": 0.7778
-         },
-         "occupations": {
-            "bias_score": 0.9547,
-            "bias_score_std": 0.874
-         }
-      }
-   }
+   "evaluations": {}
 }

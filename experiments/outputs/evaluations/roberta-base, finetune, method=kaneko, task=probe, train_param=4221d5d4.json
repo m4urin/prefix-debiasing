@@ -1,0 +1,15 @@
+{
+   "model_config": {
+      "model_name": "roberta-base",
+      "model_type": "finetune",
+      "debias_method": "kaneko",
+      "downstream_task": "probe",
+      "head_size": 1,
+      "epochs": 2,
+      "batch_size": 32,
+      "lr": 2e-05,
+      "num_warmup_steps": 10,
+      "seed": 42
+   },
+   "evaluations": {}
+}
