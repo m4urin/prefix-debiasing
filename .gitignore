@@ -1,6 +1,5 @@
 # folders
 .idea/
-data/word_lists/
 experiments/outputs/trained_models
 src/test/
 *.parquet
